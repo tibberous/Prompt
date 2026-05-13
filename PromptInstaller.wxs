@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Prompt" Manufacturer="AcquisitionInvest LLC" Version="1.0.0.0" UpgradeCode="7F665C92-4278-4014-9E36-9EAA2F5F4C10" Scope="perUser">
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Prompt">
+          <!-- Source files are added after --build creates the executable bundle. -->
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="DefaultFeature" Title="Prompt" Level="1">
+      <!-- No files available yet. -->
+    </Feature>
+  </Package>
+</Wix>

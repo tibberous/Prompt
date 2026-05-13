@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Help</title>
+<link rel="stylesheet" href="../vendor/prism/prism-tomorrow.min.css">
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #0b0f14; color: #e8eef5; font-family: "Segoe UI", system-ui, sans-serif; font-size: 15px; }
+body { line-height: 1.55; }
+a { color: #7dd3fc; text-decoration: none; }
+a:hover { color: #dbeafe; text-decoration: underline; }
+.help-shell { max-width: 1180px; margin: 0 auto; padding: 24px; }
+.hero { border: 1px solid rgba(255,255,255,.12); border-radius: 24px; padding: 30px; background: radial-gradient(circle at top left, rgba(56,189,248,.24), transparent 34%), linear-gradient(135deg,#111827,#0f172a); box-shadow: 0 20px 70px rgba(0,0,0,.35); }
+.hero h1 { margin: 0 0 10px; font-size: clamp(34px, 6vw, 58px); line-height: 1; }
+.hero p { margin: 0; max-width: 860px; color: #cbd5e1; font-size: 18px; }
+.sticky-nav { position: sticky; top: 0; z-index: 40; margin: 18px 0 24px; padding: 14px; border: 1px solid rgba(255,255,255,.10); border-radius: 18px; background: rgba(15,23,42,.94); backdrop-filter: blur(10px); box-shadow: 0 10px 34px rgba(0,0,0,.24); }
+.nav-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.nav-grid a { display: inline-block; padding: 7px 10px; border-radius: 999px; background: #111827; border: 1px solid #273449; font-size: 13px; color: #dbeafe; }
+.nav-grid a:hover { background: #1e3a5f; text-decoration: none; }
+.search-row { display: flex; gap: 10px; align-items: center; }
+#helpSearch { width: 100%; padding: 11px 14px; border-radius: 12px; border: 1px solid #334155; background: #020617; color: #f8fafc; outline: none; }
+#topButton { padding: 11px 14px; white-space: nowrap; border-radius: 12px; border: 1px solid #334155; background: #172033; color: #f8fafc; cursor: pointer; }
+.screenshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin: 24px 0; }
+.figure-card { padding: 12px; border-radius: 18px; background: #111827; border: 1px solid #263445; box-shadow: 0 10px 30px rgba(0,0,0,.22); }
+.figure-card img { width: 100%; display: block; border-radius: 12px; background: #020617; }
+.figure-card figcaption { margin-top: 9px; color: #cbd5e1; font-size: 13px; }
+.help-section { scroll-margin-top: 155px; margin: 0 0 16px; padding: 20px 22px; border-radius: 18px; border: 1px solid #263445; background: #111827; box-shadow: 0 8px 22px rgba(0,0,0,.18); }
+.help-section h2 { margin: 0 0 8px; font-size: 25px; color: #f8fafc; }
+.help-section p { margin: 0; color: #d7dee8; }
+.help-section code { font-family: Consolas, "Cascadia Mono", monospace; background: #020617; padding: 2px 5px; border-radius: 5px; }
+.callout { margin: 22px 0; padding: 18px 20px; border-left: 5px solid #38bdf8; background: #0f172a; border-radius: 14px; color: #dbeafe; }
+mark.help-hit { background: #fde68a; color: #111827; border-radius: 3px; padding: 0 2px; }
+pre[class*="language-"] { border-radius: 14px; border: 1px solid #263445; margin: 16px 0 0; }
+.footer { margin: 30px 0 12px; color: #94a3b8; font-size: 13px; text-align: center; }
+</style>
+<script src="../vendor/jquery/jquery-4.0.0.min.js"></script>
+<script src="../vendor/prism/prism.min.js"></script>
+</head>
+<body>
+<div class="help-shell">
+  <header class="hero">
+    <h1>Prompt Help</h1>
+    <p>A complete single-page guide to Prompt 1.0: prompts, doctypes, workflows, markdown controls, preview panes, settings, fonts, launcher/debugger behavior, and release workflow.</p>
+  </header>
+
+  <nav class="sticky-nav">
+    <div class="nav-grid"><a href="#overview">Overview</a>
+<a href="#quick-start">Quick Start</a>
+<a href="#main-window">Main Window Layout</a>
+<a href="#prompts">Prompts Tab</a>
+<a href="#starter-library">Starter Prompt Library</a>
+<a href="#prompt-chaining">Prompt Chaining</a>
+<a href="#workflows">Workflows</a>
+<a href="#workflow-syntax">Workflow Markdown Syntax</a>
+<a href="#comments">Comments and Notes</a>
+<a href="#doctypes">Doctypes</a>
+<a href="#normal-doctype">Normal Doctype</a>
+<a href="#cautious-doctype">Cautious Doctype</a>
+<a href="#codebot-doctype">CodeBot Doctype</a>
+<a href="#doctype-preview">Doctype Preview</a>
+<a href="#fonts">Fonts Pane</a>
+<a href="#settings">Settings</a>
+<a href="#menus">Menus and Commands</a>
+<a href="#about">About Box</a>
+<a href="#debugger">Launcher and Debugger</a>
+<a href="#offscreen">Offscreen and Screenshot Testing</a>
+<a href="#webengine">WebEngine Diagnostics</a>
+<a href="#files">Project Files and Folders</a>
+<a href="#saving">Saving and Reloading</a>
+<a href="#tips">Recommended Workflow</a>
+<a href="#troubleshooting">Troubleshooting</a>
+<a href="#release">Release Readiness</a></div>
+    <div class="search-row">
+      <input id="helpSearch" type="search" placeholder="Search help: prompts, doctypes, workflows, markdown, CodeBot, offscreen...">
+      <button id="topButton" type="button">Back to Top</button>
+    </div>
+  </nav>
+
+  <div class="screenshot-grid">
+    <figure class="figure-card"><img src="../assets/help/prompt-overview.svg" alt="Prompt overview screenshot-style diagram"><figcaption>Main prompt workbench overview.</figcaption></figure>
+    <figure class="figure-card"><img src="../assets/help/doctype-preview.svg" alt="Doctype preview screenshot-style diagram"><figcaption>Doctype/handbook preview behavior.</figcaption></figure>
+    <figure class="figure-card"><img src="../assets/help/fonts-pane.svg" alt="Fonts pane screenshot-style diagram"><figcaption>Font glyph inspection and export workflow.</figcaption></figure>
+  </div>
+
+  <div class="callout"><b>Fast path:</b> choose a starter prompt, choose a doctype, fill the workflow controls, copy the generated prompt, and paste it into your LLM session. For code projects, use <b>CodeBot</b> and preserve the CWV/AST/test/handoff rules.</div>
+
+  <main id="helpContent">
+    
+<section id="overview" class="help-section">
+  <h2>Overview</h2>
+  <p>Prompt is a desktop workbench for building strong LLM instructions from reusable pieces instead of typing one giant prompt from scratch every time. It combines prompt files, doctypes, workflows, a live prompt output pane, a font tool, settings, help, and an About box into one lightweight app.</p>
+</section>
+
+<section id="quick-start" class="help-section">
+  <h2>Quick Start</h2>
+  <p>Start in the Prompts tab. Choose a starter prompt from the prompt selector, choose a workflow, choose a doctype, fill in the task/context fields, and copy the generated prompt from the output pane. The app is designed for real work: coding, debugging, refactoring, research, documentation, and project handoff prompts.</p>
+</section>
+
+<section id="main-window" class="help-section">
+  <h2>Main Window Layout</h2>
+  <p>The main window opens with the Prompts workspace. The left side is the prompt runtime/output pane. The right side is the workflow editor/preview pane when enabled. Other tabs provide Doctypes, Fonts, Help, and Settings. The File menu handles open/save/reload actions, and the Help menu opens the About Prompt box.</p>
+</section>
+
+<section id="prompts" class="help-section">
+  <h2>Prompts Tab</h2>
+  <p>Prompts are markdown files stored in the prompts folder. They are grouped into ordered categories such as Session Bootstrap, Code Analysis and Refactor, Runtime and Debugging, Quality Localization and Data, and Research Docs and Prompt Design. Prompt filenames can use numeric prefixes to control order, but the selector displays clean Title Case names.</p>
+</section>
+
+<section id="starter-library" class="help-section">
+  <h2>Starter Prompt Library</h2>
+  <p>The built-in starter library is meant to make Prompt useful immediately. The strongest repeated practices are included where they belong: think longer for a better answer, preserve important constraints, state what is unfinished, run AST before coding, grep for whole classes of errors, unify to a current working version, and deliver a full zip when appropriate.</p>
+</section>
+
+<section id="prompt-chaining" class="help-section">
+  <h2>Prompt Chaining</h2>
+  <p>When a prompt is generated, the app stores the previous generated prompt so the next prompt can build on it. This allows a large project prompt to be assembled in stages: first bootstrap the session, then analyze code, then refactor, then test, then produce a handoff checklist.</p>
+</section>
+
+<section id="workflows" class="help-section">
+  <h2>Workflows</h2>
+  <p>Workflows define the interactive controls that appear in the prompt runtime pane. A workflow can include checkboxes, radio groups, text fields, multiline text areas, headings, comments, and explanatory text. The workflow source is markdown-like, then compiled into HTML for the WebEngine preview.</p>
+</section>
+
+<section id="workflow-syntax" class="help-section">
+  <h2>Workflow Markdown Syntax</h2>
+  <p>Use [ ] or [x] for checkboxes, [o], [O], or [0] for radio options, [____] for single-line text inputs, and [__________] for larger note fields. Markdown headings and simple formatting are supported. Descriptive comments can be shown as styled blockquote boxes so workflow authors can explain why a control exists.</p>
+</section>
+
+<section id="comments" class="help-section">
+  <h2>Comments and Notes</h2>
+  <p>Prompt supports visible descriptive comments in markdown. Supported styles include HTML comments, hash comments, double-slash comments, block comments, and [comment]...[/comment] blocks. These render as drop-shadowed note boxes in preview instead of disappearing, which makes workflows and doctypes easier to document.</p>
+</section>
+
+<section id="doctypes" class="help-section">
+  <h2>Doctypes</h2>
+  <p>Doctypes are response-preference files. They define how the LLM should behave after the prompt is copied into a model session. A doctype can describe RP / RESPONSE PREFERENCE, WARN, STOP, ASK, INFER, ASSUME, and SKILL blocks. The current starter doctypes are Normal, Cautious, and CodeBot.</p>
+</section>
+
+<section id="normal-doctype" class="help-section">
+  <h2>Normal Doctype</h2>
+  <p>Normal is the balanced everyday doctype. It is meant for general useful work: answer directly, preserve constraints, ask only when needed, infer obvious details, warn when something matters, and avoid overcomplicating simple requests.</p>
+</section>
+
+<section id="cautious-doctype" class="help-section">
+  <h2>Cautious Doctype</h2>
+  <p>Cautious is for higher-risk work where assumptions can cause expensive mistakes. It raises the threshold for warnings, asks more follow-up questions when ambiguity matters, and treats safety, correctness, legal/medical/financial uncertainty, and irreversible project changes with more care.</p>
+</section>
+
+<section id="codebot-doctype" class="help-section">
+  <h2>CodeBot Doctype</h2>
+  <p>CodeBot is the heavy coding/project doctype. It tells the model to start with AST, keep a high-level architecture view, grep for whole classes of errors, unify the repo into one CWV, delete branch clutter, compile/run/test when possible, and clearly state what was not finished.</p>
+</section>
+
+<section id="doctype-preview" class="help-section">
+  <h2>Doctype Preview</h2>
+  <p>The Doctypes tab includes an editor and preview. The preview is monospace-friendly and uses Prism.js for fenced code blocks. Code blocks include non-copying line-number gutters and copy controls so handbook/code sections are readable without polluting copied text.</p>
+</section>
+
+<section id="fonts" class="help-section">
+  <h2>Fonts Pane</h2>
+  <p>The Fonts pane opens bundled fonts from the fonts folder and displays glyphs with their index, glyph name, integer value, and U+ codepoint. Users can add glyphs to a builder list and export subsets in supported font formats. It is useful for UI asset work and icon/font experiments.</p>
+</section>
+
+<section id="settings" class="help-section">
+  <h2>Settings</h2>
+  <p>The Settings tab stores database connection fields such as host, port, database, user, and password. Settings are stored through the app&#x27;s SettingsStore using SQLite by default. Window geometry, splitter positions, panel visibility, and prompt runtime session state are also persisted.</p>
+</section>
+
+<section id="menus" class="help-section">
+  <h2>Menus and Commands</h2>
+  <p>The File menu provides Open Prompt, Save Prompt, Save Workflow, Save Doctype, Open Font, and Reload Everything. The Help menu opens About Prompt. The tab strip itself is the primary navigation between Prompts, Doctypes, Fonts, Help, and Settings.</p>
+</section>
+
+<section id="about" class="help-section">
+  <h2>About Box</h2>
+  <p>The About box uses the same WebEngine-style HTML presentation as the rest of the app. It includes Prompt 1.0 version information, Trenton Tompkins contact details, portfolio link, MIT License link, Chat GTP 5.4 Thinking credit, the cloud artwork, and the spry Tamagotchi.</p>
+</section>
+
+<section id="debugger" class="help-section">
+  <h2>Launcher and Debugger</h2>
+  <p>start.py is the launcher/debugger layer. It handles dependency checks, offscreen/capture flags, trace flags, debugger surfaces, heartbeat/fault tables, and child process launch. The app itself lives in prompt_app.py, while start.py owns bootstrap and runtime supervision.</p>
+</section>
+
+<section id="offscreen" class="help-section">
+  <h2>Offscreen and Screenshot Testing</h2>
+  <p>The launcher supports --offscreen and verbose trace modes intended for headless testing and screenshot capture. In a correctly provisioned environment, this can start the app in a managed display, write trace logs, and save screenshots for documentation or debugging.</p>
+</section>
+
+<section id="webengine" class="help-section">
+  <h2>WebEngine Diagnostics</h2>
+  <p>Preview panes use a logging WebEngine wrapper when Qt WebEngine is available. Console messages, load events, URL changes, render-process termination, source viewing, and context menu behavior are routed through shared code so HTML/CSS/JS issues are easier to diagnose.</p>
+</section>
+
+<section id="files" class="help-section">
+  <h2>Project Files and Folders</h2>
+  <p>Important folders include prompts for starter prompt markdown files, doctypes for response-preference/handbook files, workflows for interactive prompt builders, vendor for bundled JavaScript/CSS like jQuery and Prism, fonts for font assets, assets for artwork, generated for runtime HTML output, and logs for runtime diagnostics.</p>
+</section>
+
+<section id="saving" class="help-section">
+  <h2>Saving and Reloading</h2>
+  <p>Saving a prompt writes the current prompt document to the prompt library. Saving a workflow writes the workflow markdown. Saving a doctype writes the selected doctype. Reload Everything reloads workflows, doctypes, prompts, fonts, settings help, previews, and runtime output from disk.</p>
+</section>
+
+<section id="tips" class="help-section">
+  <h2>Recommended Workflow</h2>
+  <p>For coding sessions, start with Initial Response Preferences or Stage New Zip and Start New Project. For bug fixing, use a runtime/debugging prompt. For documentation, use a docs/review prompt. For high-risk changes, use the Cautious doctype. For code handoffs, use CodeBot.</p>
+</section>
+
+<section id="troubleshooting" class="help-section">
+  <h2>Troubleshooting</h2>
+  <p>If a preview does not update, use Reload Everything. If the WebEngine output looks stale, check generated HTML files. If offscreen capture fails, confirm PySide6 and Linux display tools are installed or bundled. If a prompt is not visible, check the prompts folder, filename extension, and numeric sorting prefix.</p>
+</section>
+
+<section id="release" class="help-section">
+  <h2>Release Readiness</h2>
+  <p>Before packaging, run a compile check, launch through start.py, test the main tabs, verify the help page, open About Prompt, confirm starter prompts/doctypes are present, clear stale generated files if needed, and package the unified CWV. The next planned release step is creating a Windows executable and installer.</p>
+</section>
+
+    <section id="syntax-examples" class="help-section">
+      <h2>Syntax Examples</h2>
+      <p>These are the common building blocks used by Prompt workflows and prompt files.</p>
+      <pre class="language-markdown"><code class="language-markdown"># Workflow Example
+
+[x] Think longer for a better answer.
+[ ] Run AST before coding.
+[o] Balanced response
+[o] Cautious response
+[o] CodeBot response
+
+Project name: [____]
+Detailed task:
+[__________]
+
+[comment]
+This appears as a nice note box in preview.
+[/comment]</code></pre>
+    </section>
+    <section id="codebot-example" class="help-section">
+      <h2>CodeBot Handoff Pattern</h2>
+      <p>CodeBot prompts are designed for serious project sessions where the model must inspect first, change carefully, test, and tell the truth about unfinished work.</p>
+      <pre class="language-text"><code class="language-text">Hit it with AST first.
+Keep the high-level architecture in memory.
+Grep for the whole class of error before fixing one instance.
+Unify into one CWV.
+Delete duplicate working files.
+Run compile/runtime checks when possible.
+Deliver a complete zip.
+State exactly what is not finished.</code></pre>
+    </section>
+  </main>
+
+  <div class="footer">Prompt 1.0 Help • jQuery smooth-scroll navigation • Prism.js code highlighting</div>
+</div>
+
+<script>
+(function($) {
+  function scrollToTarget(selector, duration) {
+    const target = $(selector);
+    if (!target.length) return;
+    $('html, body').stop(true).animate({ scrollTop: Math.max(0, target.offset().top - 130) }, duration || 450);
+  }
+
+  $('.nav-grid a').on('click', function(event) {
+    event.preventDefault();
+    scrollToTarget($(this).attr('href'), 520);
+  });
+
+  $('#topButton').on('click', function() {
+    $('html, body').stop(true).animate({ scrollTop: 0 }, 520);
+  });
+
+  function clearMarks() {
+    $('#helpContent mark.help-hit').each(function() {
+      $(this).replaceWith(document.createTextNode($(this).text()));
+    });
+  }
+
+  function escapeRegex(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  $('#helpSearch').on('input', function() {
+    const q = String($(this).val() || '').trim();
+    clearMarks();
+    if (!q) {
+      $('#helpContent .help-section').show();
+      Prism.highlightAll();
+      return;
+    }
+    const lower = q.toLowerCase();
+    $('#helpContent .help-section').each(function() {
+      $(this).toggle($(this).text().toLowerCase().indexOf(lower) !== -1);
+    });
+    const pattern = new RegExp('(' + escapeRegex(q) + ')', 'ig');
+    $('#helpContent .help-section:visible p, #helpContent .help-section h2').each(function() {
+      $(this).html($(this).html().replace(pattern, '<mark class="help-hit">$1</mark>'));
+    });
+    const first = $('#helpContent .help-section:visible').first();
+    if (first.length) {
+      $('html, body').stop(true).animate({ scrollTop: Math.max(0, first.offset().top - 130) }, 220);
+    }
+    Prism.highlightAll();
+  });
+
+  Prism.highlightAll();
+})(window.jQuery);
+</script>
+</body>
+</html>
