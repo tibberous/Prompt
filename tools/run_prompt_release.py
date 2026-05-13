@@ -8,6 +8,7 @@ window while building executables/installers.
 from __future__ import annotations
 
 import argparse
+import configparser
 import contextlib
 import datetime
 import hashlib
@@ -123,6 +124,21 @@ def _safe_unlink(path: Path) -> None:
         pass
 
 
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0, maximum: int = 100000) -> int:
+    try:
+        value = int(str(os.environ.get(name, str(default)) or str(default)).strip())
+    except Exception:
+        value = int(default)
+    return max(int(minimum), min(int(maximum), value))
+
+
 def quote_cmd(cmd: Iterable[str]) -> str:
     import shlex
     return " ".join(shlex.quote(str(part)) for part in cmd)
@@ -192,6 +208,9 @@ class ReleaseRunner:
         self.pipeline_log = self.logs / "build_pipeline.log"
         self.tool_state_path = self.logs / "installer_tool_state.json"
         self.build_python_state_path = self.logs / "build_python_state.json"
+        self.installer_md5_log = self.logs / "final_installer_md5s.log"
+        self.installer_dist_md5_log = self.dist / "Prompt_INSTALLER_MD5S.log"
+        self.wix_eula_required = False
         self.installer_tool_cooldown_hours = float(os.environ.get("PROMPT_INSTALLER_TOOL_COOLDOWN_HOURS", "24") or "24")
         root_hash = hashlib.sha1(str(self.root).encode("utf-8", "replace")).hexdigest()[:12]
         temp_base = Path(os.environ.get("PROMPT_BUILD_TEMP", "") or tempfile.gettempdir()).resolve()
@@ -206,6 +225,10 @@ class ReleaseRunner:
         self.dist.mkdir(parents=True, exist_ok=True)
         self.logs.mkdir(parents=True, exist_ok=True)
         self.temp.mkdir(parents=True, exist_ok=True)
+        # Single source of truth for every string baked into the .exe + installer
+        # artifacts. Loaded once here; backends and installer writers all read
+        # from self.meta. See build_info.ini for the field reference.
+        self.meta = self._load_build_info()
         if os.environ.get("PROMPT_APPEND_BUILDER_RAW_LOG", "").lower() not in {"1", "true", "yes", "on"}:
             try:
                 self.pipeline_log.write_text("", encoding="utf-8")
@@ -348,7 +371,7 @@ class ReleaseRunner:
         self.log(f"{label}:COMMAND {quote_cmd(cmd)}")
         self.log(f"{label}:CWD {cwd or self.root}")
         self.log(f"{label}:RAW-LOG {raw}")
-        self.dist_snapshot(f"before-command:{label}", limit=20)
+        self.dist_snapshot(f"before-command:{label}", limit=_env_int("PROMPT_DIST_SNAPSHOT_LIMIT", 12, minimum=0, maximum=200))
         if self.dry_run:
             raw.write_text(f"DRY RUN: {quote_cmd(cmd)}\n", encoding="utf-8")
             self.mark_status(label, "dry-run", rc=0)
@@ -441,8 +464,8 @@ class ReleaseRunner:
                     self.mark_status(label, "running", pid=proc.pid, elapsed=int(now-started), lines=len(lines), raw_bytes=raw_size, last=last_line[-240:], alive=alive)
                     next_heartbeat = now + 20.0
                 if now >= next_snapshot:
-                    self.dist_snapshot(f"heartbeat:{label}:elapsed={int(now-started)}", limit=20)
-                    self.temp_artifact_snapshot(f"heartbeat:{label}:elapsed={int(now-started)}", limit=30)
+                    self.dist_snapshot(f"heartbeat:{label}:elapsed={int(now-started)}", limit=_env_int("PROMPT_DIST_SNAPSHOT_LIMIT", 8, minimum=0, maximum=200))
+                    self.temp_artifact_snapshot(f"heartbeat:{label}:elapsed={int(now-started)}", limit=_env_int("PROMPT_TEMP_SNAPSHOT_LIMIT", 8, minimum=0, maximum=200))
                     next_snapshot = now + 60.0
                 if timeout and (now - started) > timeout:
                     self.fault(label, f"timeout after {timeout}s; killing process tree", raw=raw, rc=124, pid=getattr(proc, "pid", None))
@@ -471,8 +494,8 @@ class ReleaseRunner:
             elapsed = time.monotonic() - started
             self.log(f"{label}:EXIT rc={rc} elapsed={elapsed:.1f}s lines={len(lines)} last={last_line[-240:]}")
             self.mark_status(label, "exited", rc=rc, elapsed=f"{elapsed:.1f}", lines=len(lines), last=last_line[-240:])
-            self.dist_snapshot(f"after-command:{label}:rc={rc}", limit=40)
-            self.temp_artifact_snapshot(f"after-command:{label}:rc={rc}", limit=40)
+            self.dist_snapshot(f"after-command:{label}:rc={rc}", limit=_env_int("PROMPT_DIST_SNAPSHOT_LIMIT", 12, minimum=0, maximum=200))
+            self.temp_artifact_snapshot(f"after-command:{label}:rc={rc}", limit=_env_int("PROMPT_TEMP_SNAPSHOT_LIMIT", 8, minimum=0, maximum=200))
             if rc != 0:
                 self.fault(label, f"process exited non-zero rc={rc}", raw=raw, rc=rc, pid=getattr(proc, "pid", None))
             return rc, "\n".join(lines)
@@ -488,8 +511,8 @@ class ReleaseRunner:
                                 os.killpg(int(proc.pid), signal.SIGKILL)
             self.fault(label, f"{type(exc).__name__}: {exc}", raw=raw, exc=exc, rc=rc, pid=getattr(proc, "pid", None) if proc is not None else None)
             self.mark_status(label, "fault", rc=rc, exception=type(exc).__name__, message=str(exc))
-            self.dist_snapshot(f"fault-command:{label}:rc={rc}", limit=40)
-            self.temp_artifact_snapshot(f"fault-command:{label}:rc={rc}", limit=40)
+            self.dist_snapshot(f"fault-command:{label}:rc={rc}", limit=_env_int("PROMPT_DIST_SNAPSHOT_LIMIT", 20, minimum=0, maximum=200))
+            self.temp_artifact_snapshot(f"fault-command:{label}:rc={rc}", limit=_env_int("PROMPT_TEMP_SNAPSHOT_LIMIT", 12, minimum=0, maximum=200))
             if not soft:
                 raise
             return rc, self._tail_text(raw, lines=160, chars=12000)
@@ -927,6 +950,233 @@ class ReleaseRunner:
             if path.exists() and name != "workflows":
                 self.log(f"CLEAN:NOTE generated/runtime folder exists and will not be bundled: {path}")
 
+    # ────────────────────────────────────────────────────────────────────
+    #  Metadata + icon helpers
+    #
+    #  build_info.ini is the single source of truth for every string baked
+    #  into the EXE (VERSIONINFO resource) and the installer (Add/Remove
+    #  Programs entries, ARP help/update/phone, publisher name, etc).
+    #  ────────────────────────────────────────────────────────────────────
+    def _load_build_info(self) -> dict:
+        """Read build_info.ini → flat dict by section.
+        Falls back to sane defaults so a missing file doesn't break the build."""
+        path = self.root / "build_info.ini"
+        cfg = configparser.ConfigParser()
+        cfg.optionxform = str  # preserve key case
+        defaults = {
+            "metadata": {
+                "company": "Trenton Tompkins",
+                "app_name": APP_NAME,
+                "internal_name": APP_NAME,
+                "version": (VERSION if VERSION.count(".") == 3 else VERSION + ".0"),
+                "description": f"{APP_NAME} application",
+                "original_filename": f"{APP_NAME}.exe",
+                "copyright": f"(c) {datetime.datetime.now().year} Trenton Tompkins. MIT License.",
+                "trademarks": "",
+                "comments": "",
+            },
+            "metadata_custom": {},
+            "installer": {
+                "help_url": "",
+                "update_url": "",
+                "phone": "",
+                "publisher": "Trenton Tompkins",
+                "product_uuid": "",
+                "upgrade_uuid": "",
+            },
+        }
+        if path.exists():
+            try:
+                cfg.read(path, encoding="utf-8")
+            except Exception as exc:
+                self.warn(f"BUILD_INFO:PARSE_FAILED {type(exc).__name__}: {exc} — using defaults")
+        out = {sec: dict(defaults.get(sec, {})) for sec in defaults}
+        for sec in cfg.sections():
+            out.setdefault(sec, {})
+            for k, v in cfg.items(sec):
+                out[sec][k] = (v or "").strip()
+        ver = out["metadata"].get("version", "1.0.0.0")
+        if ver.count(".") < 3:
+            ver = ".".join((ver.split(".") + ["0", "0", "0"])[:4])
+            out["metadata"]["version"] = ver
+        # Convenience aliases used across installers.
+        m = out["metadata"]
+        i = out["installer"]
+        out["_derived"] = {
+            "version_tuple": tuple(int(x) for x in m["version"].split(".")[:4]),
+            "publisher": i.get("publisher") or m.get("company", ""),
+            "help_url": i.get("help_url") or out.get("metadata_custom", {}).get("website", ""),
+            "update_url": i.get("update_url") or out.get("metadata_custom", {}).get("website", ""),
+            "phone": i.get("phone") or out.get("metadata_custom", {}).get("phone", ""),
+            "icon": str(self.root / "icon.ico"),
+        }
+        return out
+
+    def _write_pyinstaller_version_info(self, exe_filename: str) -> Path:
+        """Generate a PyInstaller-format VSVersionInfo file from self.meta.
+        Format is the official one documented at
+        https://pyinstaller.org/en/stable/usage.html#capturing-windows-version-data — a Python literal
+        that PyInstaller evaluates to build the VERSIONINFO resource. """
+        m = self.meta["metadata"]
+        c = self.meta.get("metadata_custom", {})
+        vt = self.meta["_derived"]["version_tuple"]
+        path = self.temp / "version_info.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        strings = [
+            ("CompanyName",      m.get("company", "")),
+            ("FileDescription",  m.get("description", "")),
+            ("FileVersion",      m.get("version", "1.0.0.0")),
+            ("InternalName",     m.get("internal_name", APP_NAME)),
+            ("LegalCopyright",   m.get("copyright", "")),
+            ("LegalTrademarks",  m.get("trademarks", "")),
+            ("OriginalFilename", exe_filename),
+            ("ProductName",      m.get("app_name", APP_NAME)),
+            ("ProductVersion",   m.get("version", "1.0.0.0")),
+            ("Comments",         m.get("comments", "")),
+        ]
+        # Append custom (non-Microsoft) fields so tools like sigcheck/7-zip see them.
+        for k, v in c.items():
+            if v:
+                strings.append((k[:1].upper() + k[1:], v))
+        string_entries = ",\n          ".join(
+            f"StringStruct(u'{k}', u'{str(v).replace(chr(39), chr(92)+chr(39))}')"
+            for k, v in strings
+        )
+        path.write_text(
+            "# Auto-generated from build_info.ini by run_prompt_release.py.\n"
+            "VSVersionInfo(\n"
+            "  ffi=FixedFileInfo(\n"
+            f"    filevers={vt!r},\n"
+            f"    prodvers={vt!r},\n"
+            "    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)\n"
+            "  ),\n"
+            "  kids=[\n"
+            "    StringFileInfo([\n"
+            "      StringTable(u'040904B0', [\n"
+            f"          {string_entries}\n"
+            "      ])\n"
+            "    ]),\n"
+            "    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])\n"
+            "  ]\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _nuitka_metadata_flags(self) -> list[str]:
+        """Return --windows-* flags Nuitka uses to bake VERSIONINFO."""
+        m = self.meta["metadata"]
+        return [
+            f"--windows-company-name={m.get('company','')}",
+            f"--windows-product-name={m.get('app_name', APP_NAME)}",
+            f"--windows-file-description={m.get('description','')}",
+            f"--windows-file-version={m.get('version','1.0.0.0')}",
+            f"--windows-product-version={m.get('version','1.0.0.0')}",
+        ]
+
+    # Official rcedit binary — pinned release URL + expected size so we don't
+    # silently install an unknown blob. Update both together if bumping.
+    RCEDIT_URL  = "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe"
+    RCEDIT_SIZE = 1360384
+
+    def _rcedit_path(self) -> Path | None:
+        """Locate rcedit (Electron-style EXE resource editor). Used as a
+        unified backstop so every produced .exe gets the icon + VERSIONINFO
+        regardless of which builder produced it. Auto-downloads the pinned
+        v2.0.0 binary into <root>/tools/rcedit.exe if no copy is found —
+        opt-out via env PROMPT_RCEDIT_NO_DOWNLOAD=1."""
+        for name in ("rcedit-x64.exe", "rcedit.exe", "rcedit"):
+            found = shutil.which(name)
+            if found:
+                return Path(found)
+        for cand in (
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "rcedit.exe",
+            self.root / "tools" / "rcedit.exe",
+            self.root / "rcedit.exe",
+        ):
+            if cand.exists():
+                return cand
+        if os.environ.get("PROMPT_RCEDIT_NO_DOWNLOAD", "").lower() in {"1", "true", "yes", "on"}:
+            return None
+        if not _is_windows():
+            return None
+        dst = self.root / "tools" / "rcedit.exe"
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            self.log(f"POST:RCEDIT:FETCH downloading {self.RCEDIT_URL} → {dst}")
+            import urllib.request
+            with urllib.request.urlopen(self.RCEDIT_URL, timeout=60) as r:
+                blob = r.read()
+            if len(blob) != self.RCEDIT_SIZE:
+                self.warn(f"POST:RCEDIT:FETCH unexpected size {len(blob)} (expected {self.RCEDIT_SIZE}); refusing to install")
+                return None
+            dst.write_bytes(blob)
+            self.log(f"POST:RCEDIT:FETCH ok size={len(blob)} path={dst}")
+            return dst
+        except Exception as exc:
+            self.warn(f"POST:RCEDIT:FETCH failed {type(exc).__name__}: {exc}")
+            return None
+
+    def apply_versioninfo_and_icon(self, exe_path: Path, *, label: str = "post") -> None:
+        """Inject icon + VERSIONINFO into an already-built EXE via rcedit.
+        Idempotent: safe to re-run on the same exe. Soft-skips if rcedit
+        isn't installed (PyInstaller/Nuitka already embed at build time,
+        so this is just a backstop for cx_Freeze/PyApp/etc.)."""
+        if not exe_path or not exe_path.exists():
+            return
+        icon = self.root / "icon.ico"
+        rcedit = self._rcedit_path()
+        if not rcedit:
+            self.log(f"POST:RCEDIT:SOFT-SKIP {label} target={exe_path.name} reason=rcedit-not-on-path")
+            return
+        m = self.meta["metadata"]
+        v = m.get("version", "1.0.0.0")
+        args = [str(rcedit), str(exe_path)]
+        if icon.exists():
+            args += ["--set-icon", str(icon)]
+        args += [
+            "--set-version-string", "CompanyName",      m.get("company", ""),
+            "--set-version-string", "FileDescription",  m.get("description", ""),
+            "--set-version-string", "InternalName",     m.get("internal_name", APP_NAME),
+            "--set-version-string", "LegalCopyright",   m.get("copyright", ""),
+            "--set-version-string", "OriginalFilename", exe_path.name,
+            "--set-version-string", "ProductName",      m.get("app_name", APP_NAME),
+            "--set-file-version",    v,
+            "--set-product-version", v,
+        ]
+        rc, _ = self.run_cmd(args, label=f"rcedit_{label}_{exe_path.stem}", timeout=120)
+        if rc == 0:
+            self.log(f"POST:RCEDIT:OK {label} target={exe_path.name}")
+        else:
+            self.warn(f"POST:RCEDIT:FAILED {label} target={exe_path.name} rc={rc}")
+
+    def _resize_icon_to_png(self, dest: Path, size: int) -> bool:
+        """Rasterize C:\\Prompt\\icon.ico to a square PNG at `size`. Used to
+        generate the MSIX logo trio (44/150/50 px). Falls back to writing
+        a 1x1 transparent PNG if Pillow isn't available."""
+        try:
+            from PIL import Image  # type: ignore
+            ico = self.root / "icon.ico"
+            if not ico.exists():
+                return False
+            img = Image.open(ico)
+            # Choose the largest embedded size, then resize.
+            try:
+                sizes = img.info.get("sizes") or []
+                if sizes:
+                    largest = max(sizes, key=lambda wh: wh[0] * wh[1])
+                    img.size = largest
+                    img.load()
+            except Exception:
+                pass
+            img = img.convert("RGBA").resize((size, size), Image.LANCZOS)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            img.save(dest, format="PNG")
+            return True
+        except Exception as exc:
+            self.warn(f"MSIX:LOGO:RESIZE-FAILED size={size} dest={dest} {type(exc).__name__}: {exc}")
+            return False
+
     def build_pyinstaller(self) -> BackendResult:
         backend = "pyinstaller"
         started = time.monotonic()
@@ -941,6 +1191,9 @@ class ReleaseRunner:
             icon = self.root / "icon.ico"
             if icon.exists():
                 cmd += ["--icon", str(icon)]
+            # Bake VERSIONINFO from build_info.ini so Explorer Properties + sigcheck see the right fields.
+            version_file = self._write_pyinstaller_version_info("Prompt-PyInstaller.exe")
+            cmd += ["--version-file", str(version_file)]
             cmd += self.data_args_pyinstaller()
             cmd += ["--hidden-import", "prompt_app", "--hidden-import", "sqlalchemy", "--hidden-import", "sqlalchemy.orm"]
             for module in ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtPrintSupport", "PySide6.QtWebChannel", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets"):
@@ -971,6 +1224,8 @@ class ReleaseRunner:
                 if smoke_rc != 0:
                     return BackendResult(backend, "failed", message="frozen import smoke failed: " + smoke_out[-1000:], elapsed=time.monotonic()-started)
             artifact = self.copy_exe(exe if exe.exists() else next(out.glob(APP_NAME + "*"), out / APP_NAME), "Prompt-PyInstaller.exe", backend=backend)
+            if artifact and artifact.path and artifact.path.exists():
+                self.apply_versioninfo_and_icon(artifact.path, label="pyinstaller")
             return BackendResult(backend, "ok" if artifact else "failed", artifact=artifact, elapsed=time.monotonic()-started)
         except Exception as exc:
             return BackendResult(backend, "failed", message=f"{type(exc).__name__}: {exc}", elapsed=time.monotonic()-started)
@@ -997,6 +1252,8 @@ class ReleaseRunner:
             icon = self.root / "icon.ico"
             if icon.exists():
                 cmd += ["--icon", str(icon)]
+            version_file = self._write_pyinstaller_version_info(f"{app_dir_name}.exe")
+            cmd += ["--version-file", str(version_file)]
             cmd += self.data_args_pyinstaller()
             cmd += ["--hidden-import", "prompt_app", "--hidden-import", "sqlalchemy", "--hidden-import", "sqlalchemy.orm"]
             for module in ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtPrintSupport", "PySide6.QtWebChannel", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets"):
@@ -1032,6 +1289,11 @@ class ReleaseRunner:
                     return BackendResult(backend, "failed", message="onedir frozen import smoke failed: " + smoke_out[-1000:], elapsed=time.monotonic()-started)
             if not app_dir.exists() or not candidates:
                 return BackendResult(backend, "failed", message="PyInstaller onedir produced no executable folder", elapsed=time.monotonic()-started)
+            # Backstop: stamp the bundled .exe with rcedit so the icon shows
+            # in Explorer / taskbar without having to reproduce PyInstaller's
+            # spec-file dance.
+            if candidates:
+                self.apply_versioninfo_and_icon(candidates[0], label="pyinstaller_dir")
             bundle = self.zip_bundle(app_dir, "Prompt-PyInstallerDir-bundle.zip", backend=backend)
             artifact = self.log_bundle_as_exe_input(backend, bundle, context="post-backend-dependent-bundle")
             if artifact:
@@ -1054,8 +1316,10 @@ class ReleaseRunner:
             icon = self.root / "icon.ico"
             if icon.exists():
                 cmd.append(f"--windows-icon-from-ico={icon}")
+            # VERSIONINFO from build_info.ini — replaces the prior hardcoded
+            # AcquisitionInvest/Prompt placeholders so every binary self-identifies.
             if _is_windows():
-                cmd += ["--windows-company-name=AcquisitionInvest LLC", "--windows-product-name=Prompt", "--windows-file-version=1.0.0.0", "--windows-product-version=1.0.0.0", "--windows-file-description=Prompt 1.0 - Desktop Prompt Workbench"]
+                cmd += self._nuitka_metadata_flags()
             cmd += self.data_args_nuitka()
             cmd.append(str(target))
             rc, out_text = self.run_cmd(cmd, label="Nuitka_build", timeout=14400)
@@ -1063,6 +1327,8 @@ class ReleaseRunner:
                 return BackendResult(backend, "failed", message=f"Nuitka rc={rc}: {out_text[-1200:]}", elapsed=time.monotonic()-started)
             candidates = sorted(list(out.rglob("Prompt*.exe")) or list(out.rglob("Prompt*")), key=lambda p: p.stat().st_size if p.exists() else 0, reverse=True)
             artifact = self.copy_exe(candidates[0] if candidates else out / "Prompt.exe", "Prompt-Nuitka.exe", backend=backend)
+            if artifact and artifact.path and artifact.path.exists():
+                self.apply_versioninfo_and_icon(artifact.path, label="nuitka")
             return BackendResult(backend, "ok" if artifact else "failed", artifact=artifact, elapsed=time.monotonic()-started)
         except Exception as exc:
             self.fault("Nuitka_backend", f"{type(exc).__name__}: {exc}", exc=exc)
@@ -1080,6 +1346,11 @@ class ReleaseRunner:
             setup_py.parent.mkdir(parents=True, exist_ok=True)
             include_files = [str((self.root / name).resolve()) for name in DATA_DIRS + DATA_FILES if (self.root / name).exists() and name not in VOLATILE_DATA_DIRS]
             runtime_bins = [str(path) for path in self.python_runtime_binary_candidates()]
+            # Pull VERSIONINFO + icon out of build_info.ini so cx_Freeze bakes
+            # the same metadata that PyInstaller/Nuitka already do.
+            m = self.meta["metadata"]
+            ico_path = self.root / "icon.ico"
+            icon_arg = repr(str(ico_path)) if ico_path.exists() else "None"
             setup_py.write_text(textwrap.dedent(f'''
                 from cx_Freeze import Executable, setup
                 build_exe_options = {{
@@ -1089,7 +1360,21 @@ class ReleaseRunner:
                     "include_msvcr": True,
                     "excludes": [],
                 }}
-                setup(name="Prompt", version="{VERSION}", description="Prompt", options={{"build_exe": build_exe_options}}, executables=[Executable({str(self.frozen_entry if self.frozen_entry.exists() else self.app_entry)!r}, base="gui", target_name="Prompt-cx_Freeze.exe")])
+                setup(
+                    name={m.get("app_name", APP_NAME)!r},
+                    version={m.get("version", "1.0.0.0")!r},
+                    description={m.get("description", "")!r},
+                    author={m.get("company", "")!r},
+                    options={{"build_exe": build_exe_options}},
+                    executables=[Executable(
+                        {str(self.frozen_entry if self.frozen_entry.exists() else self.app_entry)!r},
+                        base="gui",
+                        target_name="Prompt-cx_Freeze.exe",
+                        icon={icon_arg},
+                        copyright={m.get("copyright", "")!r},
+                        trademarks={m.get("trademarks", "")!r},
+                    )],
+                )
             '''), encoding="utf-8")
             rc, _ = self.run_cmd([sys.executable, str(setup_py), "build_exe", "--build-exe", str(build_exe)], label="cx_Freeze_build", cwd=work, timeout=7200)
             if rc != 0:
@@ -1102,6 +1387,10 @@ class ReleaseRunner:
             candidates = list(build_exe.rglob("Prompt-cx_Freeze.exe")) or list(build_exe.rglob("*.exe"))
             if not candidates:
                 return BackendResult(backend, "failed", message="cx_Freeze produced no exe in build folder", elapsed=time.monotonic()-started)
+            # cx_Freeze accepts `icon=` on Executable() but older versions
+            # silently drop it; rcedit ensures the icon + VERSIONINFO land
+            # regardless of cx_Freeze build behavior.
+            self.apply_versioninfo_and_icon(candidates[0], label="cx_freeze")
             stale_single = self.dist / "Prompt-cx_Freeze.exe"
             if stale_single.exists():
                 self.warn(f"cx_freeze:REMOVING-LOOSE-STUB path={stale_single} reason=cx_Freeze needs adjacent runtime DLLs from bundle")
@@ -1260,6 +1549,10 @@ class ReleaseRunner:
                 return BackendResult(backend, "failed", message=f"PyApp cargo rc={rc}", elapsed=time.monotonic()-started)
             exe = install_root / "bin" / ("pyapp.exe" if _is_windows() else "pyapp")
             artifact = self.copy_exe(exe, "Prompt-PyApp.exe", backend=backend)
+            # PyApp's Rust launcher has no native icon/VERSIONINFO flags;
+            # rcedit-pass after copy so the produced exe self-identifies.
+            if artifact and artifact.path and artifact.path.exists():
+                self.apply_versioninfo_and_icon(artifact.path, label="pyapp")
             return BackendResult(backend, "ok" if artifact else "failed", artifact=artifact, elapsed=time.monotonic()-started)
         except Exception as exc:
             return BackendResult(backend, "failed", message=f"{type(exc).__name__}: {exc}", elapsed=time.monotonic()-started)
@@ -1719,50 +2012,128 @@ class ReleaseRunner:
     def _installer_output_md5(self, maker: str, inp: InstallerInput, output: Path, *, status: str, context: str) -> None:
         if output.exists() and output.is_file() and output.stat().st_size > 1024:
             size = output.stat().st_size
-            self.log(f"INSTALLER:MD5 maker={maker} exe_backend={inp.exe_backend} name={output.name} path={output} md5={md5_file(output)} bytes={size} human={human_size(size)} valid=1 status={status} context={context}")
+            md5 = md5_file(output)
+            valid = 1
+            human = human_size(size)
         else:
-            self.log(f"INSTALLER:MD5 maker={maker} exe_backend={inp.exe_backend} name={output.name} path={output} md5=missing bytes=0 human=0B valid=0 status={status} context={context}")
+            size = 0
+            md5 = "missing"
+            valid = 0
+            human = "0B"
+        line = f"INSTALLER:MD5 maker={maker} exe_backend={inp.exe_backend} name={output.name} path={output} md5={md5} bytes={size} human={human} valid={valid} status={status} context={context}"
+        self.log(line)
+        manifest_line = f"{_now()} maker={maker} backend={inp.exe_backend} status={status} valid={valid} bytes={size} md5={md5} path={output}\n"
+        for manifest in (self.installer_md5_log, self.installer_dist_md5_log):
+            try:
+                manifest.parent.mkdir(parents=True, exist_ok=True)
+                with manifest.open("a", encoding="utf-8", errors="replace") as fh:
+                    fh.write(manifest_line)
+            except OSError:
+                pass
 
     def _payload_files(self, payload: Path) -> list[Path]:
         return sorted([p for p in payload.rglob("*") if p.is_file()])
 
     def write_nsis_script(self, inp: InstallerInput, output: Path) -> Path:
+        """NSIS installer script. Pulls every visible field from build_info.ini:
+            - Icon / UninstallIcon use C:\\Prompt\\icon.ico
+            - VIProductVersion + VIAddVersionKey populate the EXE's VERSIONINFO
+              (Explorer Properties / sigcheck see CompanyName, FileDescription,
+               ProductName, ProductVersion, LegalCopyright, Comments).
+            - Add/Remove Programs registry keys carry DisplayName, Publisher,
+              DisplayVersion, DisplayIcon, HelpLink, URLUpdateInfo, HelpTelephone,
+              Contact, InstallLocation, EstimatedSize, and UninstallString —
+              the canonical set Windows expects under HKCU\\...\\Uninstall\\<key>.
+        """
         script = self.temp / "installer_scripts" / f"Prompt-{inp.exe_backend}-NSIS.nsi"
         script.parent.mkdir(parents=True, exist_ok=True)
-        install_lines: list[str] = []
-        for file in self._payload_files(inp.payload_dir):
-            rel = file.relative_to(inp.payload_dir)
-            rel_dir = str(rel.parent).replace("/", "\\")
-            if rel_dir == ".":
-                rel_dir = ""
-            install_lines.append(f'SetOutPath "$INSTDIR{("\\" + rel_dir) if rel_dir else ""}"')
-            install_lines.append(f'File "{str(file).replace(chr(92), chr(92)*2)}"')
-        script.write_text(textwrap.dedent(f'''
+        payload_glob = str((inp.payload_dir / "*").resolve()).replace(chr(92), chr(92) * 2)
+        exe_rel_win = inp.exe_rel.replace('/', chr(92))
+        m = self.meta["metadata"]
+        d = self.meta["_derived"]
+        icon_path = (self.root / "icon.ico")
+        icon_dir = str(icon_path).replace(chr(92), chr(92) * 2) if icon_path.exists() else ""
+        # ${PRODUCT_DISPLAY} is reused across DisplayName + shortcut names so
+        # renaming the exe_backend column doesn't desync.
+        product_display = f"Prompt {inp.exe_backend}"
+        arp_key = f"Prompt-{inp.exe_backend}"
+        defines = [
+            f'!define PRODUCT_NAME "{product_display}"',
+            f'!define PRODUCT_VERSION "{m.get("version","1.0.0.0")}"',
+            f'!define PRODUCT_PUBLISHER "{d["publisher"]}"',
+            f'!define PRODUCT_DESCRIPTION "{m.get("description","")}"',
+            f'!define PRODUCT_COPYRIGHT "{m.get("copyright","")}"',
+            f'!define PRODUCT_COMMENTS "{m.get("comments","")}"',
+            f'!define HELP_URL "{d["help_url"]}"',
+            f'!define UPDATE_URL "{d["update_url"]}"',
+            f'!define SUPPORT_PHONE "{d["phone"]}"',
+            f'!define ARP_KEY "{arp_key}"',
+        ]
+        icon_directives = []
+        if icon_dir:
+            icon_directives = [
+                f'Icon "{icon_dir}"',
+                f'UninstallIcon "{icon_dir}"',
+            ]
+        body = '\n'.join(defines) + '\n' + '\n'.join(icon_directives) + textwrap.dedent(fr'''
             Unicode True
-            Name "Prompt {inp.exe_backend}"
+            Name "${{PRODUCT_NAME}}"
+            BrandingText "${{PRODUCT_PUBLISHER}}"
             OutFile "{str(output).replace(chr(92), chr(92)*2)}"
-            InstallDir "$LOCALAPPDATA\\Prompt-{inp.exe_backend}"
+            InstallDir "$LOCALAPPDATA\Prompt-{inp.exe_backend}"
             RequestExecutionLevel user
+
+            VIProductVersion "{m.get("version","1.0.0.0")}"
+            VIAddVersionKey "ProductName"      "${{PRODUCT_NAME}}"
+            VIAddVersionKey "ProductVersion"   "${{PRODUCT_VERSION}}"
+            VIAddVersionKey "CompanyName"      "${{PRODUCT_PUBLISHER}}"
+            VIAddVersionKey "FileDescription"  "${{PRODUCT_DESCRIPTION}}"
+            VIAddVersionKey "FileVersion"      "${{PRODUCT_VERSION}}"
+            VIAddVersionKey "LegalCopyright"   "${{PRODUCT_COPYRIGHT}}"
+            VIAddVersionKey "Comments"         "${{PRODUCT_COMMENTS}}"
+
             Page directory
             Page instfiles
             UninstPage uninstConfirm
             UninstPage instfiles
+
             Section "Install"
               SetShellVarContext current
               CreateDirectory "$INSTDIR"
-              {chr(10).join('  ' + line for line in install_lines)}
-              CreateShortcut "$DESKTOP\\Prompt {inp.exe_backend}.lnk" "$INSTDIR\\{inp.exe_rel.replace('/', chr(92))}"
-              CreateDirectory "$SMPROGRAMS\\Prompt"
-              CreateShortcut "$SMPROGRAMS\\Prompt\\Prompt {inp.exe_backend}.lnk" "$INSTDIR\\{inp.exe_rel.replace('/', chr(92))}"
-              WriteUninstaller "$INSTDIR\\Uninstall.exe"
+              SetOutPath "$INSTDIR"
+              ; Recursive payload copy avoids stale per-file script entries for large PySide6/PyInstaller onedir bundles.
+              File /r "{payload_glob}"
+              CreateShortcut "$DESKTOP\${{PRODUCT_NAME}}.lnk" "$INSTDIR\{exe_rel_win}"
+              CreateDirectory "$SMPROGRAMS\Prompt"
+              CreateShortcut "$SMPROGRAMS\Prompt\${{PRODUCT_NAME}}.lnk" "$INSTDIR\{exe_rel_win}"
+              WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+              ; Add/Remove Programs registration — HKCU because RequestExecutionLevel=user.
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "DisplayName"     "${{PRODUCT_NAME}}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "DisplayVersion"  "${{PRODUCT_VERSION}}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "Publisher"       "${{PRODUCT_PUBLISHER}}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "DisplayIcon"     "$INSTDIR\{exe_rel_win}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "InstallLocation" "$INSTDIR"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "UninstallString" "$INSTDIR\Uninstall.exe"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "HelpLink"        "${{HELP_URL}}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "URLUpdateInfo"   "${{UPDATE_URL}}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "URLInfoAbout"    "${{HELP_URL}}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "HelpTelephone"   "${{SUPPORT_PHONE}}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "Contact"         "${{PRODUCT_PUBLISHER}}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "Comments"        "${{PRODUCT_COMMENTS}}"
+              WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "NoModify" 1
+              WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}" "NoRepair" 1
             SectionEnd
+
             Section "Uninstall"
-              Delete "$DESKTOP\\Prompt {inp.exe_backend}.lnk"
-              Delete "$SMPROGRAMS\\Prompt\\Prompt {inp.exe_backend}.lnk"
+              Delete "$DESKTOP\${{PRODUCT_NAME}}.lnk"
+              Delete "$SMPROGRAMS\Prompt\${{PRODUCT_NAME}}.lnk"
+              DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${{ARP_KEY}}"
               RMDir /r "$INSTDIR"
             SectionEnd
-        '''), encoding="utf-8")
-        self.log(f"INSTALLER:NSIS:SCRIPT exe_backend={inp.exe_backend} path={script} output={output}")
+        ''')
+        script.write_text(body, encoding="utf-8")
+        self.log(f"INSTALLER:NSIS:SCRIPT exe_backend={inp.exe_backend} mode=recursive-payload path={script} output={output} payload={inp.payload_dir}")
         return script
 
     def build_nsis_installer(self, inp: InstallerInput) -> Path | None:
@@ -1781,38 +2152,73 @@ class ReleaseRunner:
         return output if rc == 0 and output.exists() else None
 
     def write_inno_script(self, inp: InstallerInput, output: Path) -> Path:
+        """Inno Setup .iss script. Every [Setup] field that Inno surfaces in
+        Add/Remove Programs or the EXE VERSIONINFO is filled from build_info.ini:
+            - SetupIconFile + UninstallDisplayIcon → C:\\Prompt\\icon.ico
+            - AppPublisher / AppPublisherURL / AppSupportURL / AppUpdatesURL
+              / AppSupportPhone / AppContact → Add/Remove Programs columns
+            - VersionInfoVersion / VersionInfoCompany / VersionInfoDescription
+              / VersionInfoCopyright / VersionInfoProductName → installer EXE
+        """
         script = self.temp / "installer_scripts" / f"Prompt-{inp.exe_backend}-Inno.iss"
         script.parent.mkdir(parents=True, exist_ok=True)
-        files: list[str] = []
-        for file in self._payload_files(inp.payload_dir):
-            rel = file.relative_to(inp.payload_dir)
-            dest = "{app}" if str(rel.parent) == "." else "{app}\\" + str(rel.parent).replace("/", "\\")
-            files.append(f'Source: "{str(file)}"; DestDir: "{dest}"; Flags: ignoreversion')
+        payload_glob = str((inp.payload_dir / "*").resolve())
         exe_rel_win = inp.exe_rel.replace('/', '\\')
-        script.write_text(textwrap.dedent(f'''
-            #define MyAppName "Prompt {inp.exe_backend}"
-            #define MyAppVersion "{VERSION}"
+        icon_path = self.root / 'icon.ico'
+        setup_icon = str(icon_path) if icon_path.exists() else ''
+        m = self.meta["metadata"]
+        d = self.meta["_derived"]
+        product_display = f"Prompt {inp.exe_backend}"
+        # Defines below reference inline strings rather than {#var} chained
+        # references — Inno's preprocessor doesn't expand {#var} inside [Setup]
+        # values reliably on older ISCC versions.
+        script.write_text(textwrap.dedent(fr'''
+            ; Auto-generated by run_prompt_release.py from build_info.ini.
+            #define MyAppName "{product_display}"
+            #define MyAppVersion "{m.get("version","1.0.0.0")}"
+
             [Setup]
             AppId={{{{B6E2A8E1-7E18-4AE8-9DA1-{hashlib.md5(inp.exe_backend.encode()).hexdigest()[:12].upper()}}}}}
             AppName={{#MyAppName}}
             AppVersion={{#MyAppVersion}}
-            DefaultDirName={{localappdata}}\\Prompt-{inp.exe_backend}
+            AppVerName={{#MyAppName}} {{#MyAppVersion}}
+            AppPublisher={d["publisher"]}
+            AppPublisherURL={d["help_url"]}
+            AppSupportURL={d["help_url"]}
+            AppUpdatesURL={d["update_url"]}
+            AppSupportPhone={d["phone"]}
+            AppContact={d["publisher"]}
+            AppCopyright={m.get("copyright","")}
+            AppComments={m.get("comments","")}
+            DefaultDirName={{localappdata}}\Prompt-{inp.exe_backend}
             DefaultGroupName=Prompt
             OutputDir={self.dist}
             OutputBaseFilename={output.stem}
             Compression=lzma2
             SolidCompression=yes
             PrivilegesRequired=lowest
-            SetupIconFile={self.root / 'icon.ico' if (self.root / 'icon.ico').exists() else ''}
+            SetupIconFile={setup_icon}
+            UninstallDisplayName={product_display}
+            UninstallDisplayIcon={{app}}\{exe_rel_win}
+            VersionInfoVersion={m.get("version","1.0.0.0")}
+            VersionInfoCompany={d["publisher"]}
+            VersionInfoDescription={m.get("description","")}
+            VersionInfoCopyright={m.get("copyright","")}
+            VersionInfoProductName={product_display}
+            VersionInfoProductVersion={m.get("version","1.0.0.0")}
+
             [Files]
-            {chr(10).join(files)}
+            ; Recursive payload copy avoids stale per-file script entries for large PySide6/PyInstaller onedir bundles.
+            Source: "{payload_glob}"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
             [Icons]
-            Name: "{{autodesktop}}\\Prompt {inp.exe_backend}"; Filename: "{{app}}\\{exe_rel_win}"; Tasks: desktopicon
-            Name: "{{group}}\\Prompt {inp.exe_backend}"; Filename: "{{app}}\\{exe_rel_win}"
+            Name: "{{autodesktop}}\{product_display}"; Filename: "{{app}}\{exe_rel_win}"; Tasks: desktopicon
+            Name: "{{group}}\{product_display}"; Filename: "{{app}}\{exe_rel_win}"
+
             [Tasks]
             Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
         '''), encoding="utf-8")
-        self.log(f"INSTALLER:INNO:SCRIPT exe_backend={inp.exe_backend} path={script} output={output}")
+        self.log(f"INSTALLER:INNO:SCRIPT exe_backend={inp.exe_backend} mode=recursive-payload path={script} output={output} payload={inp.payload_dir}")
         return script
 
     def build_inno_installer(self, inp: InstallerInput) -> Path | None:
@@ -1884,17 +2290,56 @@ class ReleaseRunner:
             return '\n'.join(lines)
 
         directory_body = emit_dir('', 10)
-        product_code_tail = hashlib.md5(("wix" + inp.exe_backend).encode()).hexdigest()[:12].upper()
+        m = self.meta["metadata"]
+        d = self.meta["_derived"]
+        installer_meta = self.meta.get("installer", {})
+        # UpgradeCode MUST be stable across versions so upgrades replace the prior MSI
+        # cleanly. If build_info.ini sets one, use it. Otherwise derive a stable
+        # per-exe_backend UUID so the matrix's 5 MSIs upgrade independently.
+        cfg_upgrade = installer_meta.get("upgrade_uuid") or ""
+        if cfg_upgrade:
+            upgrade_uuid = cfg_upgrade
+        else:
+            uh = hashlib.md5(("wix" + inp.exe_backend).encode()).hexdigest().upper()
+            upgrade_uuid = f"{uh[0:8]}-{uh[8:12]}-{uh[12:16]}-{uh[16:20]}-{uh[20:32]}"
+        product_display = f"Prompt {inp.exe_backend}"
+        icon_path = self.root / "icon.ico"
+        icon_block = ""
+        icon_props = ""
+        if icon_path.exists():
+            icon_src = self._wix_escape(icon_path)
+            icon_block = f'<Icon Id="PromptIcon.ico" SourceFile="{icon_src}" />'
+            icon_props = '<Property Id="ARPPRODUCTICON" Value="PromptIcon.ico" />'
+        # Add/Remove Programs metadata properties — Windows looks up these
+        # exact property names; renaming them breaks the ARP entry.
+        arp_props = []
+        if d["help_url"]:
+            arp_props.append(f'<Property Id="ARPHELPLINK" Value="{self._wix_escape(d["help_url"])}" />')
+            arp_props.append(f'<Property Id="ARPURLINFOABOUT" Value="{self._wix_escape(d["help_url"])}" />')
+        if d["update_url"]:
+            arp_props.append(f'<Property Id="ARPURLUPDATEINFO" Value="{self._wix_escape(d["update_url"])}" />')
+        if d["phone"]:
+            arp_props.append(f'<Property Id="ARPHELPTELEPHONE" Value="{self._wix_escape(d["phone"])}" />')
+        if d["publisher"]:
+            arp_props.append(f'<Property Id="ARPCONTACT" Value="{self._wix_escape(d["publisher"])}" />')
+        if m.get("comments"):
+            arp_props.append(f'<Property Id="ARPCOMMENTS" Value="{self._wix_escape(m["comments"])}" />')
+        if m.get("copyright"):
+            arp_props.append(f'<Property Id="ARPNOMODIFY" Value="1" />')
+        arp_block = "\n    ".join([icon_props] + arp_props).strip()
         script_text = f'''<?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Prompt {inp.exe_backend}" Manufacturer="Prompt" Version="{VERSION}" UpgradeCode="11111111-2222-3333-4444-{product_code_tail}" Scope="perUser">
+  <Package Name="{self._wix_escape(product_display)}" Manufacturer="{self._wix_escape(d["publisher"])}" Version="{m.get("version","1.0.0.0")}" UpgradeCode="{upgrade_uuid}" Scope="perUser">
+    <SummaryInformation Description="{self._wix_escape(m.get("description",""))}" Manufacturer="{self._wix_escape(d["publisher"])}" />
     <MediaTemplate EmbedCab="yes" />
+    {icon_block}
+    {arp_block}
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="Prompt-{inp.exe_backend}">
 {directory_body}
       </Directory>
     </StandardDirectory>
-    <Feature Id="MainFeature" Title="Prompt" Level="1">
+    <Feature Id="MainFeature" Title="{self._wix_escape(product_display)}" Level="1">
       {chr(10).join(component_refs)}
     </Feature>
   </Package>
@@ -1914,9 +2359,26 @@ class ReleaseRunner:
         if not tool:
             self._installer_output_md5("wix", inp, output, status="tool-missing", context="matrix")
             return None
+        if self.wix_eula_required and not _env_truthy("PROMPT_WIX_ACCEPT_EULA"):
+            self.warn("INSTALLER:WIX:SKIP_EULA_REQUIRED previous WiX run returned WIX7015; review WiX OSMF EULA and set PROMPT_WIX_ACCEPT_EULA=1 to pass -acceptEula wix7")
+            self._installer_output_md5("wix", inp, output, status="wix-eula-required", context="matrix")
+            return None
         script = self.write_wix_script(inp, output)
-        rc, _ = self.run_cmd([str(tool), "build", str(script), "-o", str(output)], label=f"WiX_{inp.exe_backend}", timeout=3600)
-        self._installer_output_md5("wix", inp, output, status="ok" if rc == 0 else f"failed-rc-{rc}", context="matrix")
+        cmd = [str(tool), "build"]
+        if _env_truthy("PROMPT_WIX_ACCEPT_EULA"):
+            eula_id = os.environ.get("PROMPT_WIX_EULA_ID", "wix7").strip() or "wix7"
+            cmd.extend(["-acceptEula", eula_id])
+            self.log(f"INSTALLER:WIX:EULA exe_backend={inp.exe_backend} action=pass-acceptEula id={eula_id}")
+        else:
+            self.warn("INSTALLER:WIX:EULA not accepted by Prompt automatically; if WiX v7 reports WIX7015, review https://wixtoolset.org/osmf/ and set PROMPT_WIX_ACCEPT_EULA=1")
+        cmd.extend([str(script), "-o", str(output)])
+        rc, out = self.run_cmd(cmd, label=f"WiX_{inp.exe_backend}", timeout=3600)
+        status = "ok" if rc == 0 else f"failed-rc-{rc}"
+        if rc != 0 and "WIX7015" in str(out):
+            self.wix_eula_required = True
+            status = "wix-eula-required"
+            self.warn("INSTALLER:WIX:EULA_REQUIRED detected WIX7015; remaining WiX matrix entries will be skipped unless PROMPT_WIX_ACCEPT_EULA=1")
+        self._installer_output_md5("wix", inp, output, status=status, context="matrix")
         return output if rc == 0 and output.exists() else None
 
     def _copytree_contents(self, source: Path, destination: Path) -> None:
@@ -1930,15 +2392,33 @@ class ReleaseRunner:
                 shutil.copy2(item, target)
 
     def _write_msix_placeholder_pngs(self, assets_dir: Path) -> None:
-        # 1x1 transparent PNG. MakeAppx only needs package assets to exist; a real
-        # branding pass can replace these later without touching installer logic.
+        """Generate the MSIX logo trio from C:\\Prompt\\icon.ico:
+            Square44x44Logo.png  — taskbar / Start small tile
+            Square150x150Logo.png — Start medium tile
+            StoreLogo.png        — Store / Apps & Features (50x50 nominal)
+        Falls back to 1x1 transparent PNGs if Pillow + icon.ico aren't both
+        available — MakeAppx only requires the assets exist, so a missing
+        icon doesn't fail the pack."""
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        targets = {
+            "Square44x44Logo.png": 44,
+            "Square150x150Logo.png": 150,
+            "StoreLogo.png": 50,
+        }
+        any_real = False
+        for name, size in targets.items():
+            if self._resize_icon_to_png(assets_dir / name, size):
+                any_real = True
+        if any_real:
+            self.log("MSIX:LOGOS rendered from icon.ico " + ",".join(targets))
+            return
         import base64 as _base64
         png = _base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/l9n7WQAAAABJRU5ErkJggg=="
         )
-        assets_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("Square44x44Logo.png", "Square150x150Logo.png", "StoreLogo.png"):
+        for name in targets:
             (assets_dir / name).write_bytes(png)
+        self.warn("MSIX:LOGOS:PLACEHOLDER icon.ico/Pillow unavailable; wrote 1x1 PNGs so MakeAppx still packs")
 
     def _msix_identity_name(self, inp: InstallerInput) -> str:
         safe = ''.join(ch if ch.isalnum() or ch == '.' else '.' for ch in f"Prompt.{inp.exe_backend}")
@@ -1948,14 +2428,22 @@ class ReleaseRunner:
         return safe[:50]
 
     def write_msix_manifest(self, inp: InstallerInput, content_dir: Path) -> Path:
+        """AppxManifest.xml — MSIX/AppX schema. Identity.Publisher MUST be a
+        full X.500 string ("CN=Foo, O=Bar"); the literal "CN=Prompt" the old
+        manifest used is legal but generic, so we let build_info.ini's
+        publisher override via PROMPT_MSIX_PUBLISHER env or fall back to a
+        CN=<publisher> derived from build_info's [installer].publisher."""
         manifest = content_dir / "AppxManifest.xml"
         exe_rel = inp.exe_rel.replace('/', '\\')
         identity_name = self._msix_identity_name(inp)
-        display_name = f"Prompt {inp.exe_backend}"
-        publisher = os.environ.get("PROMPT_MSIX_PUBLISHER", "CN=Prompt")
-        version = os.environ.get("PROMPT_MSIX_VERSION", f"{VERSION}.0" if VERSION.count('.') == 2 else VERSION)
+        m = self.meta["metadata"]
+        d = self.meta["_derived"]
+        display_name = f"{m.get('app_name', APP_NAME)} {inp.exe_backend}"
+        publisher = os.environ.get("PROMPT_MSIX_PUBLISHER") or f"CN={d['publisher']}"
+        version = os.environ.get("PROMPT_MSIX_VERSION", m.get("version", "1.0.0.0"))
         if version.count('.') != 3:
             version = "1.0.0.0"
+        description = m.get("description") or f"Prompt desktop application packaged from the {inp.exe_backend} executable."
         manifest.write_text(textwrap.dedent(f'''
             <?xml version="1.0" encoding="utf-8"?>
             <Package
@@ -1966,8 +2454,8 @@ class ReleaseRunner:
               <Identity Name="{identity_name}" Publisher="{publisher}" Version="{version}" ProcessorArchitecture="x64" />
               <Properties>
                 <DisplayName>{display_name}</DisplayName>
-                <PublisherDisplayName>Prompt</PublisherDisplayName>
-                <Description>Prompt desktop application packaged from the {inp.exe_backend} executable.</Description>
+                <PublisherDisplayName>{d["publisher"]}</PublisherDisplayName>
+                <Description>{description}</Description>
                 <Logo>Assets\\StoreLogo.png</Logo>
               </Properties>
               <Dependencies>
@@ -1978,7 +2466,7 @@ class ReleaseRunner:
               </Resources>
               <Applications>
                 <Application Id="Prompt" Executable="{exe_rel}" EntryPoint="Windows.FullTrustApplication">
-                  <uap:VisualElements DisplayName="{display_name}" Description="Prompt" Square150x150Logo="Assets\\Square150x150Logo.png" Square44x44Logo="Assets\\Square44x44Logo.png" BackgroundColor="transparent" />
+                  <uap:VisualElements DisplayName="{display_name}" Description="{description}" Square150x150Logo="Assets\\Square150x150Logo.png" Square44x44Logo="Assets\\Square44x44Logo.png" BackgroundColor="transparent" />
                 </Application>
               </Applications>
               <Capabilities>
@@ -2031,18 +2519,45 @@ class ReleaseRunner:
         payload = project_dir / "payload"
         self._copytree_contents(inp.payload_dir, payload)
         exe_rel_win = inp.exe_rel.replace('/', '\\')
+        m = self.meta["metadata"]
+        d = self.meta["_derived"]
+        product_display = f"Prompt {inp.exe_backend}"
+        icon_path = self.root / "icon.ico"
+        # Advanced Installer CLI surface:
+        #   /SetProperty Name=Value       — any MSI property (ProductName, Manufacturer, ARP*, etc.)
+        #   /SetVersion 1.0.0.0           — the MSI ProductVersion
+        #   /SetIcon -icon path [-id N]   — embed AND register ARPPRODUCTICON
+        #   /NewShortcut -icon path       — give shortcut its own icon
+        # Reference: https://www.advancedinstaller.com/user-guide/command-line.html
         commands: list[tuple[str, list[str]]] = [
-            ("newproject", [str(tool), "/newproject", str(aip), "-type", "professional", "-lang", "en", "-overwrite"]),
-            ("product_name", [str(tool), "/edit", str(aip), "/SetProperty", f"ProductName=Prompt {inp.exe_backend}"]),
-            ("manufacturer", [str(tool), "/edit", str(aip), "/SetProperty", "Manufacturer=Prompt"]),
-            ("version", [str(tool), "/edit", str(aip), "/SetVersion", VERSION]),
-            ("appdir", [str(tool), "/edit", str(aip), "/SetAppdir", "-buildname", "DefaultBuild", "-path", f"[LocalAppDataFolder]Prompt-{inp.exe_backend}"]),
-            ("shortcutdir", [str(tool), "/edit", str(aip), "/SetShortcutdir", "-buildname", "DefaultBuild", "-path", "[ProgramMenuFolder]Prompt"]),
-            ("addfolder", [str(tool), "/edit", str(aip), "/AddFolder", "APPDIR", str(payload), "-install_in_parent_folder"]),
-            ("shortcut", [str(tool), "/edit", str(aip), "/NewShortcut", "-name", f"Prompt {inp.exe_backend}", "-dir", "SHORTCUTDIR", "-target", f"APPDIR\\{exe_rel_win}", "-wkdir", "APPDIR"]),
-            ("packagename", [str(tool), "/edit", str(aip), "/SetPackageName", output.name, "-buildname", "DefaultBuild"]),
-            ("build", [str(tool), "/build", str(aip)]),
+            ("newproject",   [str(tool), "/newproject", str(aip), "-type", "professional", "-lang", "en", "-overwrite"]),
+            ("product_name", [str(tool), "/edit", str(aip), "/SetProperty", f"ProductName={product_display}"]),
+            ("manufacturer", [str(tool), "/edit", str(aip), "/SetProperty", f"Manufacturer={d['publisher']}"]),
+            ("version",      [str(tool), "/edit", str(aip), "/SetVersion", m.get("version", "1.0.0.0")]),
+            ("appdir",       [str(tool), "/edit", str(aip), "/SetAppdir", "-buildname", "DefaultBuild", "-path", f"[LocalAppDataFolder]Prompt-{inp.exe_backend}"]),
+            ("shortcutdir",  [str(tool), "/edit", str(aip), "/SetShortcutdir", "-buildname", "DefaultBuild", "-path", "[ProgramMenuFolder]Prompt"]),
+            ("addfolder",    [str(tool), "/edit", str(aip), "/AddFolder", "APPDIR", str(payload), "-install_in_parent_folder"]),
         ]
+        # ARP fields — only set what we have so empty strings don't fill the
+        # entries in Apps & Features with blanks.
+        if d["help_url"]:
+            commands.append(("arp_help",   [str(tool), "/edit", str(aip), "/SetProperty", f"ARPHELPLINK={d['help_url']}"]))
+            commands.append(("arp_about",  [str(tool), "/edit", str(aip), "/SetProperty", f"ARPURLINFOABOUT={d['help_url']}"]))
+        if d["update_url"]:
+            commands.append(("arp_update", [str(tool), "/edit", str(aip), "/SetProperty", f"ARPURLUPDATEINFO={d['update_url']}"]))
+        if d["phone"]:
+            commands.append(("arp_phone",  [str(tool), "/edit", str(aip), "/SetProperty", f"ARPHELPTELEPHONE={d['phone']}"]))
+        if d["publisher"]:
+            commands.append(("arp_contact",[str(tool), "/edit", str(aip), "/SetProperty", f"ARPCONTACT={d['publisher']}"]))
+        if m.get("comments"):
+            commands.append(("arp_comments",[str(tool), "/edit", str(aip), "/SetProperty", f"ARPCOMMENTS={m['comments']}"]))
+        if icon_path.exists():
+            commands.append(("seticon",    [str(tool), "/edit", str(aip), "/SetIcon", "-icon", str(icon_path)]))
+            commands.append(("shortcut",   [str(tool), "/edit", str(aip), "/NewShortcut", "-name", product_display, "-dir", "SHORTCUTDIR", "-target", f"APPDIR\\{exe_rel_win}", "-wkdir", "APPDIR", "-icon", str(icon_path)]))
+        else:
+            commands.append(("shortcut",   [str(tool), "/edit", str(aip), "/NewShortcut", "-name", product_display, "-dir", "SHORTCUTDIR", "-target", f"APPDIR\\{exe_rel_win}", "-wkdir", "APPDIR"]))
+        commands.append(("packagename", [str(tool), "/edit", str(aip), "/SetPackageName", output.name, "-buildname", "DefaultBuild"]))
+        commands.append(("build",       [str(tool), "/build", str(aip)]))
         self.log(f"INSTALLER:ADVANCED_INSTALLER:PROJECT exe_backend={inp.exe_backend} aip={aip} output={output}")
         for label, command in commands:
             rc, _ = self.run_cmd(command, label=f"AdvancedInstaller_{inp.exe_backend}_{label}", cwd=project_dir, timeout=3600)
@@ -2091,6 +2606,13 @@ class ReleaseRunner:
         unknown = [x for x in wrappers if x not in known_wrappers]
         wrappers = [x for x in wrappers if x in known_wrappers]
         self.log("INSTALLERS:BEGIN requested=" + ",".join(normalized) + f" wrappers={wrappers} unknown={unknown}")
+        if os.environ.get("PROMPT_APPEND_INSTALLER_MD5_LOG", "").lower() not in {"1", "true", "yes", "on"}:
+            for manifest in (self.installer_md5_log, self.installer_dist_md5_log):
+                try:
+                    manifest.parent.mkdir(parents=True, exist_ok=True)
+                    manifest.write_text("", encoding="utf-8")
+                except OSError:
+                    pass
         inputs = self.discover_installer_inputs()
         if not inputs and not self.dry_run and os.environ.get("PROMPT_INSTALLERS_AUTO_BUILD_EXES", "1").lower() in {"1", "true", "yes", "on"}:
             self.warn("INSTALLERS:NO-EXES auto-building EXEs before installer matrix")

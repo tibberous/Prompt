@@ -2606,49 +2606,6 @@ def promptConfigPath() -> Path:
     return BASE_DIR / 'config.ini'
 
 
-def promptBuildInfoPath() -> Path:
-    """Path to build_info.ini — the single source of truth for every string
-    baked into the built executables and installers (VERSIONINFO + Add/Remove
-    Programs entries + WiX manufacturer / Inno publisher / NSIS VIAddVersionKey)."""
-    return BASE_DIR / 'build_info.ini'
-
-
-_BUILD_INFO_CACHE: configparser.RawConfigParser | None = None
-
-
-def promptBuildInfoParser() -> configparser.RawConfigParser:
-    """Cached parser for build_info.ini. If the file is missing, returns an
-    empty parser — callers fall back to config.ini[metadata] / hardcoded
-    defaults via promptBuildInfo()."""
-    global _BUILD_INFO_CACHE
-    if _BUILD_INFO_CACHE is not None:
-        return _BUILD_INFO_CACHE
-    parser = configparser.RawConfigParser()
-    path = promptBuildInfoPath()
-    try:
-        if path.exists():
-            parser.read(path, encoding='utf-8')
-    except Exception as error:
-        captureException(None, source='start.py', context='except@promptBuildInfoParser')
-        print(f"[WARN:start.py.build_info] {type(error).__name__}: {error}", file=sys.stderr, flush=True)
-    _BUILD_INFO_CACHE = parser
-    return parser
-
-
-def promptBuildInfo(section: str, key: str, fallback: str = EMPTY_STRING) -> str:
-    """Read a single value from build_info.ini. Falls back to the supplied
-    default if the section/key is absent. All EXE + installer builders go
-    through this so editing build_info.ini propagates everywhere."""
-    parser = promptBuildInfoParser()
-    try:
-        if parser.has_option(section, key):
-            v = parser.get(section, key, fallback=fallback)
-            return (v or fallback).strip()
-    except Exception:
-        pass
-    return fallback
-
-
 def promptConfigParser() -> configparser.RawConfigParser:
     parser = configparser.RawConfigParser()
     path = promptConfigPath()
@@ -5729,59 +5686,21 @@ class PromptApplicationPackager:
         return None
 
     def metadata(self) -> dict[str, str]:
-        """Build EXE + installer metadata from build_info.ini.
-
-        Every value comes from build_info.ini[metadata]. The keys returned
-        are the standard Win32 VERSIONINFO StringFileInfo names so they
-        feed straight into writePyInstallerVersionFile() / the Nuitka,
-        cx_Freeze, and PyApp version-info paths plus the NSIS/Inno/WiX
-        installer scripts.
-
-        The four `Custom*` keys carry the optional fields (author, license,
-        website, phone) that the installer scripts and the custom-field
-        section of the VERSIONINFO resource consume.
-        """
-        ensurePromptMetadataConfig()  # back-compat: still writes config.ini[metadata]
-        version = promptBuildInfo('metadata', 'version', '') or promptConfiguredVersion('1.0.0')
+        ensurePromptMetadataConfig()
+        parser = promptConfigParser()
+        version = promptConfiguredVersion('1.0.0')
         version4 = '.'.join(str(part) for part in promptVersionTuple4(version))
-        app_name = promptBuildInfo('metadata', 'app_name', 'Prompt')
-        company  = promptBuildInfo('metadata', 'company',  'Trenton Tompkins')
-        copyright_s = promptBuildInfo('metadata', 'copyright', 'Trenton Tompkins')
-        description = promptBuildInfo('metadata', 'description', f'{app_name} {version}')
-        original_fn = promptBuildInfo('metadata', 'original_filename', f'{app_name}.exe')
-        internal_nm = promptBuildInfo('metadata', 'internal_name', app_name)
-        trademarks  = promptBuildInfo('metadata', 'trademarks', EMPTY_STRING)
-        comments    = promptBuildInfo('metadata', 'comments',
-                                      'https://trentontompkins.com  ·  (724) 431-5207')
         metadata = dict(self.EXE_METADATA)
         metadata.update({
-            'CompanyName':      company,
-            'FileDescription':  description,
-            'FileVersion':      version4,
-            'InternalName':     internal_nm,
-            'LegalCopyright':   copyright_s,
-            'LegalTrademarks':  trademarks,
-            'OriginalFilename': original_fn,
-            'ProductName':      app_name,
-            'ProductVersion':   version4,
-            'Comments':         comments,
-            # Custom fields — emitted as additional StringStruct entries by
-            # writePyInstallerVersionFile (and read by NSIS/Inno/WiX writers).
-            'CustomAuthor':   promptBuildInfo('metadata_custom', 'author',   EMPTY_STRING),
-            'CustomLicense':  promptBuildInfo('metadata_custom', 'license',  EMPTY_STRING),
-            'CustomWebsite':  promptBuildInfo('metadata_custom', 'website',  EMPTY_STRING),
-            'CustomGithub':   promptBuildInfo('metadata_custom', 'github',   EMPTY_STRING),
-            'CustomPhone':    promptBuildInfo('metadata_custom', 'phone',    EMPTY_STRING),
-            'CustomEmail':    promptBuildInfo('metadata_custom', 'email',    EMPTY_STRING),
-            'CustomCodedBy':  promptBuildInfo('metadata_custom', 'coded_by', EMPTY_STRING),
-            # Installer-only — consumed by NSIS/Inno/WiX writers, ignored
-            # by the .exe VERSIONINFO emitter.
-            'InstallerHelpUrl':    promptBuildInfo('installer', 'help_url',    EMPTY_STRING),
-            'InstallerUpdateUrl':  promptBuildInfo('installer', 'update_url',  EMPTY_STRING),
-            'InstallerPhone':      promptBuildInfo('installer', 'phone',       EMPTY_STRING),
-            'InstallerPublisher':  promptBuildInfo('installer', 'publisher', company),
-            'InstallerProductUuid':promptBuildInfo('installer', 'product_uuid', EMPTY_STRING),
-            'InstallerUpgradeUuid':promptBuildInfo('installer', 'upgrade_uuid', EMPTY_STRING),
+            'CompanyName': parser.get('metadata', 'company', fallback='AcquisitionInvest LLC') if parser.has_section('metadata') else 'AcquisitionInvest LLC',
+            'FileDescription': f'Prompt {version} - Desktop Prompt Workbench',
+            'FileVersion': version4,
+            'InternalName': 'Prompt',
+            'LegalCopyright': parser.get('metadata', 'copyright', fallback='AcquisitionInvest LLC © 2026') if parser.has_section('metadata') else 'AcquisitionInvest LLC © 2026',
+            'OriginalFilename': 'Prompt.exe',
+            'ProductName': parser.get('metadata', 'app_name', fallback='Prompt') if parser.has_section('metadata') else 'Prompt',
+            'ProductVersion': version4,
+            'Comments': f'Prompt {version} | Author: Trenton Tompkins | Coded by ChatGPT | http://www.trentontompkins.com | TrentTompkins@gmail.com | (724) 431-4207',
         })
         return metadata
 
@@ -5798,37 +5717,6 @@ class PromptApplicationPackager:
 
         file_tuple = promptVersionTuple4(str(metadata.get('FileVersion', '1.0.0.0')) )
         product_tuple = promptVersionTuple4(str(metadata.get('ProductVersion', '1.0.0.0')) )
-
-        # Standard 10 VERSIONINFO fields (visible in Explorer > Properties).
-        standard_keys = (
-            'CompanyName', 'FileDescription', 'FileVersion', 'InternalName',
-            'LegalCopyright', 'LegalTrademarks', 'OriginalFilename',
-            'ProductName', 'ProductVersion', 'Comments',
-        )
-        # Custom string-struct entries — emitted alongside the standard set.
-        # Microsoft's Properties dialog ignores them, but PowerShell
-        # `(Get-Item …).VersionInfo`, Sigcheck, PEStudio, ResourceHacker, and
-        # 7-Zip Properties all surface them. Blank values are skipped so we
-        # don't pollute the resource with empties.
-        custom_pairs = [
-            ('Author',  metadata.get('CustomAuthor', EMPTY_STRING)),
-            ('License', metadata.get('CustomLicense', EMPTY_STRING)),
-            ('Website', metadata.get('CustomWebsite', EMPTY_STRING)),
-            ('GitHub',  metadata.get('CustomGithub', EMPTY_STRING)),
-            ('Phone',   metadata.get('CustomPhone', EMPTY_STRING)),
-            ('Email',   metadata.get('CustomEmail', EMPTY_STRING)),
-            ('CodedBy', metadata.get('CustomCodedBy', EMPTY_STRING)),
-        ]
-        custom_pairs = [(k, str(v or EMPTY_STRING)) for k, v in custom_pairs if v]
-
-        struct_lines: list[str] = []
-        for key in standard_keys:
-            struct_lines.append(
-                f"          StringStruct('{key}', {quoted(str(metadata.get(key, EMPTY_STRING) or EMPTY_STRING))}),"
-            )
-        for key, value in custom_pairs:
-            struct_lines.append(f"          StringStruct('{key}', {quoted(value)}),")
-        structs_block = '\n'.join(struct_lines)
 
         content = f"""# UTF-8
 VSVersionInfo(
@@ -5847,7 +5735,16 @@ VSVersionInfo(
       StringTable(
         '040904B0',
         [
-{structs_block}
+          StringStruct('CompanyName', {quoted(str(metadata.get('CompanyName', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('FileDescription', {quoted(str(metadata.get('FileDescription', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('FileVersion', {quoted(str(metadata.get('FileVersion', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('InternalName', {quoted(str(metadata.get('InternalName', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('LegalCopyright', {quoted(str(metadata.get('LegalCopyright', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('LegalTrademarks', {quoted(str(metadata.get('LegalTrademarks', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('OriginalFilename', {quoted(str(metadata.get('OriginalFilename', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('ProductName', {quoted(str(metadata.get('ProductName', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('ProductVersion', {quoted(str(metadata.get('ProductVersion', EMPTY_STRING) or EMPTY_STRING))}),
+          StringStruct('Comments', {quoted(str(metadata.get('Comments', EMPTY_STRING) or EMPTY_STRING))}),
         ]
       )
     ]),

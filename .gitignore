@@ -1,101 +1,44 @@
-# =============================================================================
-# Prompt — .gitignore
-# =============================================================================
-# Goal: ship only the source needed to build. Everything generated locally
-# (artifacts, logs, caches, runtime state) and everything sensitive
-# (config.ini holds live API keys) stays out of the repo.
-# =============================================================================
-
-# --- Secrets ------------------------------------------------------------------
-# config.ini holds live API keys (Anthropic, OpenAI, Gemini, xAI, Azure).
-# Ship a sanitized template named config.sample.ini instead.
-config.ini
-
-# --- Build / packaging output -------------------------------------------------
-# Final .exe / .zip / .msi land in dist/. Re-built on every invocation.
-dist/
-# PyInstaller scratch.
-build/
-# cx_Freeze scratch.
-build_exe/
-# Generated Qt/PySide6 runtime trees.
 linux_runtime/
-# Auto-generated Python sources (translations, resource caches, etc.).
 generated/
-# Installer staging dirs.
 installer/
-# Compiled installers ready to upload.
+build/
+dist/
 release_upload/
-# Per-version snapshots / diagnostic dumps.
-reports/
-# Stale or temp staging.
-workspaces/
-
-# --- Logs ---------------------------------------------------------------------
 logs/
-debug.log
-run.log
-run_faults.log
-errors.log
-*.log
-*.raw.log
-*.fault.log
-.auto-*-child*.log
-.auto-build-exes.log
-.auto-build-installers.log
-.auto-build-exes-state
-.auto-build-installers-state
-
-# --- Python caches ------------------------------------------------------------
+reports/
+workspaces/
 __pycache__/
 *.py[cod]
 *.pyo
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# --- Local databases / sync state --------------------------------------------
+debug.log
+run.log
+run_faults.log
+*.raw.log
+*.fault.log
 push_files.sqlite3
 push_files.sqlite3-shm
 push_files.sqlite3-wal
-
-# --- Canonical-working-version helpers ---------------------------------------
 cwv
 x.cip
-
-# --- Diagnostic JSON dumps ----------------------------------------------------
+*.tmp
+*.bak
+*.old
 *.json
 AST_SCAN_*.json
 *WINSCP*SESSION*INVENTORY*.json
 *.inventory.json
 *.detector.json
-collision_report.json
-
-# --- Temp / backup files ------------------------------------------------------
-*.tmp
-*.bak
-*.old
-*~
-*.swp
-
-# --- IDE / OS metadata --------------------------------------------------------
-.idea/
-.vscode/
-*.code-workspace
-.DS_Store
-Thumbs.db
-
-# --- Generated icons / favicons (rebuild via tools/image_to_ico.py) ----------
-# Keep favicon_io/ source PNGs, ignore generated .ico if you regenerate often.
-# Uncomment if you want the generated .ico out of the repo:
-# icon.ico
-# favicon.ico
-
-# --- Vendor / third-party drops (large; reproducible by install scripts) -----
-# Comment these out if you DO want to ship vendored binaries.
-vendor/cache/
-
-# --- Editor crash + autosave files -------------------------------------------
-*.orig
-*.rej
+.auto-*-child*.log
+errors.log
+# --- Auto-watcher runtime state + logs (never commit) ------------------------
+.auto-*-state
+.auto-*.log
+*.log
+# --- Per-machine secrets — NEVER commit. Keep a sanitized config.sample.ini --
+config.ini
+config.local.ini
+# --- Auto-downloaded rcedit + ephemeral release artifacts --------------------
+tools/rcedit.exe
+last_update_check.txt
+local_release_md5.txt
+updates/

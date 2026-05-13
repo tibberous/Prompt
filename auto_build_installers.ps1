@@ -36,6 +36,20 @@ try {
     if ($logParent) { New-Item -ItemType Directory -Force -Path $logParent | Out-Null }
     Set-Content -Path $CombinedLogPath -Value $null -Encoding UTF8
     if (-not ($env:PROMPT_APPEND_DEBUG_LOG -match '^(1|true|yes|on)$')) { Set-Content -Path $DebugLogPath -Value $null -Encoding UTF8 }
+    if (-not ($env:PROMPT_APPEND_RUN_LOG -match '^(1|true|yes|on)$')) {
+        foreach ($rootLogName in @('run.log', 'run_faults.log', 'errors.log')) {
+            $rootLogPath = Join-Path $Root $rootLogName
+            Set-Content -Path $rootLogPath -Value $null -Encoding UTF8
+        }
+    }
+    if (-not ($env:PROMPT_APPEND_BUILD_LOGS -match '^(1|true|yes|on)$')) {
+        $logsDir = Join-Path $Root 'logs'
+        if (Test-Path $logsDir) {
+            Get-ChildItem -Path $logsDir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '(?i)(^early_build_|^release_|\.raw\.log$|final_.*md5s\.log$|build_pipeline\.log$)' } |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    }
     Set-Content -Path $StdoutLogPath -Value $null -Encoding UTF8
     Set-Content -Path $StderrLogPath -Value $null -Encoding UTF8
     Get-ChildItem -Path $Root -Filter '.auto-*-child*.log' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -758,6 +772,8 @@ function Start-ChildProcess {
         if (-not $env:PROMPT_AUTO_INSTALL_BUILD_PYTHON) { $env:PROMPT_AUTO_INSTALL_BUILD_PYTHON = '1' }
         if (-not $env:PROMPT_BUILD_PYTHON_COOLDOWN_HOURS) { $env:PROMPT_BUILD_PYTHON_COOLDOWN_HOURS = '24' }
         if (-not $env:PROMPT_INSTALLER_TOOL_COOLDOWN_HOURS) { $env:PROMPT_INSTALLER_TOOL_COOLDOWN_HOURS = '24' }
+        if (-not $env:PROMPT_DIST_SNAPSHOT_LIMIT) { $env:PROMPT_DIST_SNAPSHOT_LIMIT = '8' }
+        if (-not $env:PROMPT_TEMP_SNAPSHOT_LIMIT) { $env:PROMPT_TEMP_SNAPSHOT_LIMIT = '8' }
         # Do not force PROMPT_BUILD_PYTHON to the launcher interpreter here.
         # The release runner must be free to pick a backend-safe Python for
         # Nuitka/py2exe, or to experiment with Python 3.14 when no safer one
