@@ -8,6 +8,7 @@ window while building executables/installers.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import configparser
 import contextlib
 import datetime
@@ -931,7 +932,65 @@ class ReleaseRunner:
                         zf.write(item, item.relative_to(source.parent))
         size = target.stat().st_size
         self.log(f"BUNDLE:MD5 backend={backend} name={target.name} path={target} md5={md5_file(target)} bytes={size} human={human_size(size)} valid=1 status=ok")
+        # Unpack the bundle into dist/<name-without-bundle.zip>/ and delete the
+        # zip. Net result: dist contains a ready-to-run folder for onedir-style
+        # backends instead of a zip the user has to extract manually. Also
+        # re-stamps the bundled exe's icon via rcedit so Explorer thumbnails
+        # show the project icon on the loose tree.
+        try:
+            unpack_root = self.unpack_bundle_into_dist(target, backend=backend)
+            if unpack_root:
+                # Find the .exe inside the unpacked tree and rcedit it for the icon.
+                for exe in unpack_root.rglob("*.exe"):
+                    self.apply_versioninfo_and_icon(exe, label=f"{backend}-unpacked")
+                    break  # only the primary launcher
+        except Exception as exc:
+            self.warn(f"BUNDLE:UNPACK backend={backend} target={target} failed={type(exc).__name__}: {exc}")
         return target
+
+    def unpack_bundle_into_dist(self, bundle_zip: Path, *, backend: str) -> Path | None:
+        """Extract bundle_zip into dist/<stem-without-bundle>/ and delete the
+        zip on success. Returns the extraction root or None if the zip is
+        missing / unreadable. Idempotent: a stale unpacked dir from a prior
+        run is wiped first so file content always matches the current zip."""
+        if not bundle_zip or not bundle_zip.exists():
+            return None
+        stem = bundle_zip.stem
+        if stem.endswith('-bundle'):
+            stem = stem[:-len('-bundle')]
+        dest = self.dist / stem
+        if dest.exists():
+            try:
+                shutil.rmtree(dest, ignore_errors=True)
+            except OSError:
+                pass
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(bundle_zip, "r") as zf:
+                zf.extractall(dest)
+        except (zipfile.BadZipFile, OSError) as exc:
+            self.warn(f"BUNDLE:UNPACK backend={backend} zip={bundle_zip} extract-failed {type(exc).__name__}: {exc}")
+            return None
+        # Many bundle zips wrap their content in a single top-level directory
+        # named after the source folder (PyInstaller --onedir, cx_Freeze).
+        # Flatten that one extra level so the user gets dist/<stem>/<files>
+        # directly instead of dist/<stem>/<stem>/<files>.
+        entries = [p for p in dest.iterdir() if not p.name.startswith('.')]
+        if len(entries) == 1 and entries[0].is_dir():
+            inner = entries[0]
+            for child in inner.iterdir():
+                shutil.move(str(child), str(dest / child.name))
+            try:
+                inner.rmdir()
+            except OSError:
+                pass
+        # Done — wipe the zip so dist isn't cluttered with redundant artifacts.
+        try:
+            bundle_zip.unlink()
+            self.log(f"BUNDLE:UNPACK backend={backend} extracted={dest} zip-deleted={bundle_zip.name}")
+        except OSError as exc:
+            self.warn(f"BUNDLE:UNPACK backend={backend} could not delete zip {bundle_zip}: {exc}")
+        return dest
 
     def clean_generated_before_build(self) -> None:
         self.dist.mkdir(exist_ok=True)
@@ -1015,31 +1074,52 @@ class ReleaseRunner:
     def _write_pyinstaller_version_info(self, exe_filename: str) -> Path:
         """Generate a PyInstaller-format VSVersionInfo file from self.meta.
         Format is the official one documented at
-        https://pyinstaller.org/en/stable/usage.html#capturing-windows-version-data — a Python literal
-        that PyInstaller evaluates to build the VERSIONINFO resource. """
+        https://pyinstaller.org/en/stable/usage.html#capturing-windows-version-data - a Python literal
+        that PyInstaller evaluates to build the VERSIONINFO resource.
+
+        All string fields get ASCII-folded before being emitted. PyInstaller
+        can technically handle Unicode in VSVersionInfo, but a stray em-dash
+        in build_info.ini hung the PKG phase of one build mid-resource-bake
+        on this user's box -- the loader stub got written without its
+        payload appended (~323KB file). The fold below replaces common
+        smart-typography characters with ASCII equivalents and strips any
+        leftover non-ASCII. Cheaper than diagnosing PyInstaller's resource
+        encoder and the metadata is for Explorer/sigcheck which are happy
+        with plain ASCII. """
+        def _ascii(s):
+            return (str(s or "")
+                .replace("—", "-")    # em dash
+                .replace("–", "-")    # en dash
+                .replace("·", "*")    # middle dot
+                .replace("•", "*")    # bullet
+                .replace("‘", "'").replace("’", "'")
+                .replace("“", '"').replace("”", '"')
+                .replace(" ", " ")    # nbsp
+                .encode("ascii", "ignore").decode("ascii")
+            )
         m = self.meta["metadata"]
         c = self.meta.get("metadata_custom", {})
         vt = self.meta["_derived"]["version_tuple"]
         path = self.temp / "version_info.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
         strings = [
-            ("CompanyName",      m.get("company", "")),
-            ("FileDescription",  m.get("description", "")),
-            ("FileVersion",      m.get("version", "1.0.0.0")),
-            ("InternalName",     m.get("internal_name", APP_NAME)),
-            ("LegalCopyright",   m.get("copyright", "")),
-            ("LegalTrademarks",  m.get("trademarks", "")),
-            ("OriginalFilename", exe_filename),
-            ("ProductName",      m.get("app_name", APP_NAME)),
-            ("ProductVersion",   m.get("version", "1.0.0.0")),
-            ("Comments",         m.get("comments", "")),
+            ("CompanyName",      _ascii(m.get("company", ""))),
+            ("FileDescription",  _ascii(m.get("description", ""))),
+            ("FileVersion",      _ascii(m.get("version", "1.0.0.0"))),
+            ("InternalName",     _ascii(m.get("internal_name", APP_NAME))),
+            ("LegalCopyright",   _ascii(m.get("copyright", ""))),
+            ("LegalTrademarks",  _ascii(m.get("trademarks", ""))),
+            ("OriginalFilename", _ascii(exe_filename)),
+            ("ProductName",      _ascii(m.get("app_name", APP_NAME))),
+            ("ProductVersion",   _ascii(m.get("version", "1.0.0.0"))),
+            ("Comments",         _ascii(m.get("comments", ""))),
         ]
         # Append custom (non-Microsoft) fields so tools like sigcheck/7-zip see them.
         for k, v in c.items():
             if v:
-                strings.append((k[:1].upper() + k[1:], v))
+                strings.append((k[:1].upper() + k[1:], _ascii(v)))
         string_entries = ",\n          ".join(
-            f"StringStruct(u'{k}', u'{str(v).replace(chr(39), chr(92)+chr(39))}')"
+            f"StringStruct(u'{k}', u'{v.replace(chr(39), chr(92)+chr(39))}')"
             for k, v in strings
         )
         path.write_text(
@@ -1177,8 +1257,38 @@ class ReleaseRunner:
             self.warn(f"MSIX:LOGO:RESIZE-FAILED size={size} dest={dest} {type(exc).__name__}: {exc}")
             return False
 
+    def _log_backend_context(self, backend: str) -> None:
+        """Dump a `BACKEND:CONTEXT` block to the main log at the start of every
+        backend run. Captures everything that's likely to be the proximate
+        cause of a failure: python path/version, key compiler/tool locations,
+        relevant env vars, available memory + disk free on the temp drive.
+        Cheap to gather, free to ignore on success, gold on failure."""
+        try:
+            self.log(f"BACKEND:CONTEXT backend={backend} ─── begin ───")
+            self.log(f"BACKEND:CONTEXT backend={backend} sys.executable={sys.executable}")
+            self.log(f"BACKEND:CONTEXT backend={backend} sys.version={sys.version.split(chr(10))[0]}")
+            self.log(f"BACKEND:CONTEXT backend={backend} platform={platform.platform()}")
+            self.log(f"BACKEND:CONTEXT backend={backend} cwd={self.root}")
+            self.log(f"BACKEND:CONTEXT backend={backend} temp={self.temp}")
+            for tool in ("python", "py", "cargo", "rustc", "rustup", "cl", "link", "gcc", "make", "winget", "git"):
+                found = shutil.which(tool)
+                self.log(f"BACKEND:CONTEXT backend={backend} which({tool})={found or 'MISSING'}")
+            for ev in ("PATH", "TEMP", "LOCALAPPDATA", "CARGO_HOME", "RUSTUP_HOME", "VCINSTALLDIR", "INCLUDE", "LIB"):
+                v = os.environ.get(ev, '')
+                self.log(f"BACKEND:CONTEXT backend={backend} env[{ev}]={v[:300]}{'…' if len(v) > 300 else ''}")
+            try:
+                import shutil as _shutil
+                usage = _shutil.disk_usage(str(self.temp))
+                self.log(f"BACKEND:CONTEXT backend={backend} temp-drive free={usage.free//(1<<30)}GB total={usage.total//(1<<30)}GB")
+            except Exception as exc:
+                self.log(f"BACKEND:CONTEXT backend={backend} disk-usage-failed={exc}")
+            self.log(f"BACKEND:CONTEXT backend={backend} ─── end ───")
+        except Exception as exc:
+            self.log(f"BACKEND:CONTEXT backend={backend} context-dump-failed={exc}")
+
     def build_pyinstaller(self) -> BackendResult:
         backend = "pyinstaller"
+        self._log_backend_context(backend)
         started = time.monotonic()
         try:
             if not self.ensure_module("PyInstaller", "pyinstaller", backend=backend):
@@ -1187,7 +1297,20 @@ class ReleaseRunner:
             work = self.temp / backend / "work"
             spec = self.temp / backend / "spec"
             target = self.frozen_entry if self.frozen_entry.exists() else self.app_entry
-            cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed", "--name", APP_NAME, "--distpath", str(out), "--workpath", str(work), "--specpath", str(spec)]
+            # PyInstaller verbose flags — max signal for failure diagnosis:
+            #   --log-level=TRACE   most verbose tier (above DEBUG/INFO/WARN/ERROR)
+            #   --debug=all         imports + bootloader + noarchive tracing baked
+            #                       into the produced exe (failure clues survive
+            #                       even if the build itself succeeds and the run
+            #                       crashes — bootloader prints its own log)
+            #   --noupx             UPX compression has caused mysterious "PE
+            #                       not valid" failures here before; turning it
+            #                       off makes any "exe is corrupt" symptom a
+            #                       PyInstaller bug, not a UPX one
+            cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
+                   "--log-level=TRACE", "--debug=all", "--noupx",
+                   "--onefile", "--windowed", "--name", APP_NAME,
+                   "--distpath", str(out), "--workpath", str(work), "--specpath", str(spec)]
             icon = self.root / "icon.ico"
             if icon.exists():
                 cmd += ["--icon", str(icon)]
@@ -1232,6 +1355,7 @@ class ReleaseRunner:
 
     def build_pyinstaller_dir(self) -> BackendResult:
         backend = "pyinstaller_dir"
+        self._log_backend_context(backend)
         started = time.monotonic()
         try:
             if not self.ensure_module("PyInstaller", "pyinstaller", backend=backend):
@@ -1243,7 +1367,9 @@ class ReleaseRunner:
             app_dir_name = "Prompt-PyInstallerDir"
             cmd = [
                 sys.executable, "-m", "PyInstaller",
-                "--noconfirm", "--clean", "--onedir", "--windowed",
+                "--noconfirm", "--clean",
+                "--log-level=TRACE", "--debug=all", "--noupx",
+                "--onedir", "--windowed",
                 "--name", app_dir_name,
                 "--distpath", str(out),
                 "--workpath", str(work),
@@ -1305,6 +1431,7 @@ class ReleaseRunner:
 
     def build_nuitka(self) -> BackendResult:
         backend = "nuitka"
+        self._log_backend_context(backend)
         started = time.monotonic()
         try:
             python_cmd = self.backend_python_command(backend, prefer_build_safe=True)
@@ -1312,7 +1439,25 @@ class ReleaseRunner:
                 return BackendResult(backend, "failed", message="Nuitka unavailable for selected backend Python", elapsed=time.monotonic()-started)
             out = self.temp / backend / "dist"
             target = self.frozen_entry if self.frozen_entry.exists() else self.app_entry
-            cmd = [*python_cmd, "-m", "nuitka", "--standalone", "--onefile", "--assume-yes-for-downloads", "--enable-plugin=pyside6", "--include-module=prompt_app", "--include-package=sqlalchemy", f"--output-dir={out}", f"--output-filename={APP_NAME}"]
+            # Nuitka verbose flags — see `python -m nuitka --help`:
+            #   --verbose                ← turns on tracing
+            #   --show-progress          ← per-step progress prints
+            #   --show-modules           ← dumps the included module tree at end
+            #   --show-scons             ← prints scons compile commands (the
+            #                              C compiler invocations); this is
+            #                              where MSVC / MinGW errors live
+            #   --show-anti-bloat-changes ← what got stripped + why
+            #   --report=<path>          ← writes a structured XML report w/
+            #                              every reason a module was/wasn't
+            #                              included, plugin decisions, timings
+            report_xml = self.logs / "nuitka_compilation_report.xml"
+            cmd = [*python_cmd, "-m", "nuitka", "--standalone", "--onefile",
+                   "--verbose", "--show-progress", "--show-modules",
+                   "--show-scons", "--show-anti-bloat-changes",
+                   f"--report={report_xml}",
+                   "--assume-yes-for-downloads", "--enable-plugin=pyside6",
+                   "--include-module=prompt_app", "--include-package=sqlalchemy",
+                   f"--output-dir={out}", f"--output-filename={APP_NAME}"]
             icon = self.root / "icon.ico"
             if icon.exists():
                 cmd.append(f"--windows-icon-from-ico={icon}")
@@ -1336,6 +1481,7 @@ class ReleaseRunner:
 
     def build_cx_freeze(self) -> BackendResult:
         backend = "cx_freeze"
+        self._log_backend_context(backend)
         started = time.monotonic()
         try:
             if not self.ensure_module("cx_Freeze", "cx_Freeze", backend=backend):
@@ -1348,6 +1494,8 @@ class ReleaseRunner:
             runtime_bins = [str(path) for path in self.python_runtime_binary_candidates()]
             # Pull VERSIONINFO + icon out of build_info.ini so cx_Freeze bakes
             # the same metadata that PyInstaller/Nuitka already do.
+            # `silent_level=0` is cx_Freeze 6+ for "loudest possible" — prints
+            # every module copied, every missing dep, every hook invocation.
             m = self.meta["metadata"]
             ico_path = self.root / "icon.ico"
             icon_arg = repr(str(ico_path)) if ico_path.exists() else "None"
@@ -1359,6 +1507,7 @@ class ReleaseRunner:
                     "bin_includes": ["python3.dll", "python{sys.version_info.major}{sys.version_info.minor}.dll", "vcruntime140.dll", "vcruntime140_1.dll"],
                     "include_msvcr": True,
                     "excludes": [],
+                    "silent_level": 0,   # 0=verbose, 3=quiet — loudest available
                 }}
                 setup(
                     name={m.get("app_name", APP_NAME)!r},
@@ -1376,7 +1525,10 @@ class ReleaseRunner:
                     )],
                 )
             '''), encoding="utf-8")
-            rc, _ = self.run_cmd([sys.executable, str(setup_py), "build_exe", "--build-exe", str(build_exe)], label="cx_Freeze_build", cwd=work, timeout=7200)
+            # -v -v flags distutils' verbose=2 ("show every command"); together
+            # with silent_level=0 in build_exe_options this prints every file
+            # copy + every excluded module + every missing dep with reasons.
+            rc, _ = self.run_cmd([sys.executable, "-v", str(setup_py), "-v", "-v", "build_exe", "--build-exe", str(build_exe)], label="cx_Freeze_build", cwd=work, timeout=7200)
             if rc != 0:
                 return BackendResult(backend, "failed", message=f"cx_Freeze rc={rc}", elapsed=time.monotonic()-started)
             if self.dry_run:
@@ -1514,6 +1666,7 @@ class ReleaseRunner:
 
     def build_pyapp(self) -> BackendResult:
         backend = "pyapp"
+        self._log_backend_context(backend)
         started = time.monotonic()
         try:
             cargo = self.ensure_cargo()
@@ -1537,12 +1690,22 @@ class ReleaseRunner:
                 "PYAPP_DISTRIBUTION_EMBED": "1",
                 "PYAPP_FULL_ISOLATION": "1",
                 "PYAPP_PIP_EXTRA_ARGS": "--prefer-binary",
+                # Cargo + Rust verbose hooks. RUST_BACKTRACE=full surfaces
+                # any rustc panic with a full stack instead of a single line;
+                # CARGO_TERM_VERBOSE=true forces verbose even when stdout is
+                # piped (cargo otherwise auto-quiets); RUSTC_LOG=trace turns
+                # on rustc-internal trace logging.
+                "RUST_BACKTRACE": "full",
+                "CARGO_TERM_VERBOSE": "true",
+                "CARGO_TERM_COLOR": "never",
+                "RUSTC_LOG": "trace",
             }
             self.log(f"PYAPP:BUILD:CWD {self.root}")
             self.log(f"PYAPP:BUILD:INSTALL_ROOT {install_root}")
             for k, v in env.items():
                 self.log(f"PYAPP:ENV {k}={v}")
-            cmd = [str(cargo), "install", "pyapp", "--force", "--root", str(install_root)]
+            # -vv on cargo install = "very verbose" (build command output too).
+            cmd = [str(cargo), "install", "pyapp", "--force", "-vv", "--root", str(install_root)]
             self.log("PYAPP:BUILD:COMMAND " + quote_cmd(cmd))
             rc, _ = self.run_cmd(cmd, label="PyApp_build", timeout=7200, env=env)
             if rc != 0:
@@ -1614,21 +1777,122 @@ class ReleaseRunner:
         result = func()
         self.dist_snapshot(f"after-backend:{backend}:status={result.status}", limit=40)
         self.temp_artifact_snapshot(f"after-backend:{backend}:status={result.status}", limit=40)
+        # Always verify the artifact landed at the expected dist path with a
+        # non-stub size, regardless of the BackendResult status. Catches the
+        # "PyInstaller exited 0 but only the bootloader stub got copied" case.
+        try:
+            expected = result.artifact.path if result.artifact else self.dist / ('Prompt-' + backend + '.exe')
+            self._verify_artifact(backend, expected)
+        except Exception as exc:
+            self.warn(f"EXE:VERIFY backend={backend} status=PROBE_FAILED err={exc}")
         if result.ok or (self.dry_run and result.status == 'ok'):
             artifact_path = result.artifact.path if result.artifact else self.dist / ('Prompt-' + backend + '.exe')
             self.log(f"BACKEND:SUCCESS backend={backend} path={artifact_path} elapsed={result.elapsed:.1f}s")
         else:
-            self.warn(f"BACKEND:{result.status.upper()} backend={backend} message={result.message} elapsed={result.elapsed:.1f}s")
+            # Dump the tail of the failed backend's raw log into the MAIN log
+            # so the user sees the actual builder error without digging. 200
+            # lines and 20 KB chars covers most Python tracebacks, Rust
+            # backtraces, and cl.exe link-error spew with margin.
+            try:
+                raw_log_path = self.raw_log_path(backend + '_build')
+                if raw_log_path and raw_log_path.exists():
+                    raw_tail = self._tail_text(raw_log_path, lines=200, chars=20000)
+                    if raw_tail.strip():
+                        self.warn(f"BACKEND:{result.status.upper()}:RAW-TAIL backend={backend} raw_log={raw_log_path}")
+                        for ln in self._tail_lines(raw_tail, n=200).splitlines():
+                            self.warn(ln)
+                    else:
+                        self.warn(f"BACKEND:{result.status.upper()}:RAW-EMPTY backend={backend} raw_log={raw_log_path} — no output captured (builder may have crashed before printing)")
+                else:
+                    self.warn(f"BACKEND:{result.status.upper()}:NO-RAW-LOG backend={backend} (run_cmd was never invoked — failure is in the wrapper, not the builder)")
+            except Exception as exc:
+                self.warn(f"BACKEND:RAW-TAIL-FAILED backend={backend} err={exc}")
+            # Empty BackendResult.message is itself a diagnostic signal — say
+            # so loudly so the user knows the wrapper produced no reason,
+            # which is usually a bundle-classification bug rather than a
+            # builder failure.
+            msg = result.message if result.message else '(empty — no reason from wrapper; check RAW-TAIL above and EXE:VERIFY for the real state)'
+            self.warn(f"BACKEND:{result.status.upper()} backend={backend} message={msg} elapsed={result.elapsed:.1f}s")
             # Every backend still gets a grep-friendly evidence line.
             self.log(f"EXE:MD5 backend={backend} name=Prompt-{backend}.exe path={self.dist / ('Prompt-' + backend + '.exe')} md5=missing bytes=0 human=0B valid=0 status={result.status} context=post-backend")
         return result
+
+    def _tail_lines(self, text: str, n: int = 60) -> str:
+        """Return the last `n` non-empty lines of `text` as a single string,
+        each prefixed with `  | ` so it's obvious in the main log that this
+        is captured-subprocess output, not a release-runner log line."""
+        lines = [ln.rstrip() for ln in str(text or '').splitlines() if ln.strip()]
+        tail = lines[-n:] if len(lines) > n else lines
+        return '\n'.join('  | ' + ln for ln in tail)
+
+    def _verify_artifact(self, backend: str, expected_path: Path | None) -> None:
+        """One-line `EXE:VERIFY` summary per backend so the user can see at a
+        glance whether each EXE actually landed at the expected path with a
+        non-stub size. Run after every build_<backend> regardless of the
+        BackendResult status."""
+        if not expected_path:
+            self.log(f"EXE:VERIFY backend={backend} status=NO_EXPECTED_PATH")
+            return
+        p = Path(expected_path)
+        if not p.exists():
+            self.log(f"EXE:VERIFY backend={backend} status=MISSING path={p}")
+            return
+        try:
+            size = p.stat().st_size
+        except OSError as exc:
+            self.log(f"EXE:VERIFY backend={backend} status=STAT_FAILED path={p} err={exc}")
+            return
+        # Bootloader stubs are ~300-400KB; real PySide6 builds are 60-200MB.
+        # Flag anything under 5MB as suspiciously-small.
+        suspect = ' SUSPICIOUS_STUB_SIZE' if size < 5_000_000 else ''
+        md5 = ''
+        try:
+            with p.open('rb') as fh:
+                h = hashlib.md5()
+                for chunk in iter(lambda: fh.read(1 << 20), b''):
+                    h.update(chunk)
+                md5 = h.hexdigest()
+        except OSError:
+            pass
+        self.log(f"EXE:VERIFY backend={backend} status=PRESENT path={p} bytes={size:,} md5={md5}{suspect}")
 
     def build_exes(self, backends: list[str]) -> int:
         self.clean_generated_before_build()
         self.log_backend_plan(backends)
         self.dist_snapshot("start-build-exes", limit=40)
         self.temp_artifact_snapshot("start-build-exes", limit=40)
-        results = [self.build_backend(backend) for backend in backends]
+        # All 5 backends run CONCURRENTLY in a thread pool. Each backend
+        # already uses its own subprocess + its own temp/work/dist filename,
+        # so there are no filesystem conflicts. The GIL is irrelevant since
+        # every backend's main work happens inside subprocess.Popen, which
+        # releases the GIL. Wall-clock time = ~ the slowest backend (Nuitka)
+        # instead of the sum of all five.
+        #
+        # Use PROMPT_PARALLEL_EXES=0 to fall back to the old serial loop.
+        # Concurrent CPU + disk contention can slow per-backend builds,
+        # so this knob lets the user opt out without code changes.
+        parallel = os.environ.get('PROMPT_PARALLEL_EXES', '1').lower() not in {'0', 'false', 'no', 'off'}
+        results: list[BackendResult] = []
+        if parallel and len(backends) > 1:
+            self.log(f"EXE:PARALLEL begin workers={len(backends)} backends={','.join(backends)}")
+            done_count = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(backends), thread_name_prefix='exe-worker') as pool:
+                future_to_backend = {pool.submit(self.build_backend, backend): backend for backend in backends}
+                for fut in concurrent.futures.as_completed(future_to_backend):
+                    backend = future_to_backend[fut]
+                    try:
+                        r = fut.result()
+                    except Exception as exc:
+                        traceback.print_exc()
+                        self.warn(f"EXE:PARALLEL backend={backend} EXCEPTION {type(exc).__name__}: {exc}")
+                        r = BackendResult(backend, 'failed', message=f'{type(exc).__name__}: {exc}')
+                    results.append(r)
+                    done_count += 1
+                    self.log(f"EXE:PARALLEL progress {done_count}/{len(backends)} just_completed={backend} status={r.status} message={str(r.message or '')[:200]}")
+            self.log(f"EXE:PARALLEL done total={len(results)}")
+        else:
+            self.log(f"EXE:SERIAL begin backends={','.join(backends)}")
+            results = [self.build_backend(backend) for backend in backends]
         ok = [r for r in results if r.ok or (self.dry_run and r.status == "ok")]
         summary = {r.backend: {"status": r.status, "message": r.message, "artifact": str(r.artifact.path) if r.artifact else ""} for r in results}
         self.dist_snapshot("final-build-exes", limit=80)
@@ -2432,7 +2696,10 @@ class ReleaseRunner:
         full X.500 string ("CN=Foo, O=Bar"); the literal "CN=Prompt" the old
         manifest used is legal but generic, so we let build_info.ini's
         publisher override via PROMPT_MSIX_PUBLISHER env or fall back to a
-        CN=<publisher> derived from build_info's [installer].publisher."""
+        CN=<publisher> derived from build_info's [installer].publisher.
+        All interpolated values are XML-escaped — MakeAppx rejects raw '&',
+        '<', '>' as "Illegal name character" when they appear in text or
+        attribute content (and Description text routinely contains '&')."""
         manifest = content_dir / "AppxManifest.xml"
         exe_rel = inp.exe_rel.replace('/', '\\')
         identity_name = self._msix_identity_name(inp)
@@ -2444,6 +2711,23 @@ class ReleaseRunner:
         if version.count('.') != 3:
             version = "1.0.0.0"
         description = m.get("description") or f"Prompt desktop application packaged from the {inp.exe_backend} executable."
+
+        def _xml(s):
+            return (str(s)
+                    .replace('&', '&amp;')
+                    .replace('<', '&lt;')
+                    .replace('>', '&gt;')
+                    .replace('"', '&quot;')
+                    .replace("'", '&apos;'))
+
+        x_identity   = _xml(identity_name)
+        x_publisher  = _xml(publisher)
+        x_version    = _xml(version)
+        x_display    = _xml(display_name)
+        x_pubdisplay = _xml(d["publisher"])
+        x_description= _xml(description)
+        x_exe_rel    = _xml(exe_rel)
+
         manifest.write_text(textwrap.dedent(f'''
             <?xml version="1.0" encoding="utf-8"?>
             <Package
@@ -2451,11 +2735,11 @@ class ReleaseRunner:
               xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
               xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
               IgnorableNamespaces="uap rescap">
-              <Identity Name="{identity_name}" Publisher="{publisher}" Version="{version}" ProcessorArchitecture="x64" />
+              <Identity Name="{x_identity}" Publisher="{x_publisher}" Version="{x_version}" ProcessorArchitecture="x64" />
               <Properties>
-                <DisplayName>{display_name}</DisplayName>
-                <PublisherDisplayName>{d["publisher"]}</PublisherDisplayName>
-                <Description>{description}</Description>
+                <DisplayName>{x_display}</DisplayName>
+                <PublisherDisplayName>{x_pubdisplay}</PublisherDisplayName>
+                <Description>{x_description}</Description>
                 <Logo>Assets\\StoreLogo.png</Logo>
               </Properties>
               <Dependencies>
@@ -2465,8 +2749,8 @@ class ReleaseRunner:
                 <Resource Language="en-us" />
               </Resources>
               <Applications>
-                <Application Id="Prompt" Executable="{exe_rel}" EntryPoint="Windows.FullTrustApplication">
-                  <uap:VisualElements DisplayName="{display_name}" Description="{description}" Square150x150Logo="Assets\\Square150x150Logo.png" Square44x44Logo="Assets\\Square44x44Logo.png" BackgroundColor="transparent" />
+                <Application Id="Prompt" Executable="{x_exe_rel}" EntryPoint="Windows.FullTrustApplication">
+                  <uap:VisualElements DisplayName="{x_display}" Description="{x_description}" Square150x150Logo="Assets\\Square150x150Logo.png" Square44x44Logo="Assets\\Square44x44Logo.png" BackgroundColor="transparent" />
                 </Application>
               </Applications>
               <Capabilities>
